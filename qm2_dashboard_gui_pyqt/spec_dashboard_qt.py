@@ -1,5 +1,5 @@
 """
-QM2 Dashboard — PyQt5 native GUI.
+SPEC Dashboard — PyQt5 native GUI.
 
 A native desktop application (PyQt5 + pyqtgraph) for browsing and analyzing
 SPEC data files from synchrotron beamline experiments. Built to match the
@@ -8,14 +8,19 @@ so both native GUIs share one dependency stack.
 
 All parsing/analysis logic lives in spec_core.py (toolkit-agnostic, reused
 unchanged from the Tkinter build). This file only handles presentation.
+Everything beamline-specific (titles, tabs, live-signal channels, data
+layout, ...) comes from a YAML config in configs/, loaded by
+beamline_config.py.
 
 Run with:
-    python spec_dashboard_qt.py
+    python spec_dashboard_qt.py                          # configs/id3a.yaml
+    python spec_dashboard_qt.py --config configs/qm2.yaml
 
 Requirements:
-    pip install PyQt5 pyqtgraph pandas numpy scipy
+    pip install -r requirements.txt
 """
 
+import argparse
 import json
 import os
 import re
@@ -52,6 +57,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+import beamline_config as bcfg
 import spec_core as sc
 import chess_signals as csig
 
@@ -81,9 +87,8 @@ EMAIL_PROVIDER_PRESETS = {
 # Where the "Remember these settings" checkbox in the email dialog persists
 # its values between runs. Kept in the user's home directory (not the repo)
 # since it may contain a plaintext password if the user opts into that.
-EMAIL_SETTINGS_PATH = os.path.join(
-    os.path.expanduser("~"), ".qm2_dashboard_email_settings.json"
-)
+# Named from the config's app.settings_prefix by _apply_config().
+EMAIL_SETTINGS_PATH = ""
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -97,11 +102,10 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # into the dedicated "Slack Alerts" tab at runtime and, only if
 # the user opts in via "Remember token on this computer", persisted to
 # SLACK_SETTINGS_PATH in the user's home directory (chmod 600, same as
-# EMAIL_SETTINGS_PATH's password-remembering behavior above).
-SLACK_SETTINGS_PATH = os.path.join(
-    os.path.expanduser("~"), ".qm2_dashboard_slack_settings.json"
-)
-SLACK_DEFAULT_CHANNEL = "#beamline-status"
+# EMAIL_SETTINGS_PATH's password-remembering behavior above). Both set from
+# the config by _apply_config().
+SLACK_SETTINGS_PATH = ""
+SLACK_DEFAULT_CHANNEL = ""
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 
 # ── Theme system (Dark / Light) ──────────────────────────────────────────
@@ -390,16 +394,46 @@ _apply_theme_globals("dark")
 pg.setConfigOptions(antialias=True, background=BG_PANEL, foreground=TEXT_PRIMARY,
                      imageAxisOrder="row-major")
 
+# ── Beamline config ──────────────────────────────────────────────────────
+# The loaded beamline YAML config (see beamline_config.py / configs/). The
+# module-level names below are filled from it by _apply_config() at startup,
+# before any widget is built.
+CONFIG: Dict = {}
 # APP_TITLE: the short name used for the window title bar, the taskbar/app
-# name (QApplication.setApplicationName), and the About dialog -- kept
-# short per the user's "QM2 SPEC dashboard to QM2 Dashboard" request.
-# HOME_PAGE_TITLE: the longer, more formal heading shown at the top of the
-# Home tab itself -- separate from APP_TITLE per the user's follow-up
-# "QM2 SPEC Dashboard to Quantum Materials (QM2) Beamline Dashboard"
-# request, so the window title stays short while the in-app heading is
-# fully spelled out.
-APP_TITLE = "QM2 Dashboard"
-HOME_PAGE_TITLE = "Quantum Materials (QM2) Beamline Dashboard"
+# name (QApplication.setApplicationName), and the About dialog.
+# HOME_PAGE_TITLE: the longer heading shown at the top of the Home tab.
+APP_TITLE = ""
+HOME_PAGE_TITLE = ""
+
+
+def _apply_config(cfg: Dict):
+    """Make `cfg` (from bcfg.load_config) the active beamline config: set
+    the module-level names that come from it and configure spec_core and
+    chess_signals."""
+    global CONFIG, APP_TITLE, HOME_PAGE_TITLE
+    global EMAIL_SETTINGS_PATH, SLACK_SETTINGS_PATH, SLACK_DEFAULT_CHANNEL
+    global _DEFAULT_Y_PRIORITY, _X_FALLBACK_COLUMNS, _CALIBRATION_FILES
+    global LIVE_FRAME_EXT, _LIVE_FRAME_NO_RE
+    CONFIG = cfg
+    app = cfg["app"]
+    APP_TITLE = app.get("title") or "SPEC Dashboard"
+    HOME_PAGE_TITLE = app.get("home_title") or APP_TITLE
+
+    prefix = app.get("settings_prefix") or "spec_dashboard"
+    home = os.path.expanduser("~")
+    EMAIL_SETTINGS_PATH = os.path.join(home, f".{prefix}_email_settings.json")
+    SLACK_SETTINGS_PATH = os.path.join(home, f".{prefix}_slack_settings.json")
+    SLACK_DEFAULT_CHANNEL = cfg["slack"].get("default_channel") or ""
+
+    _DEFAULT_Y_PRIORITY = list(cfg["plot"].get("default_y_priority") or [])
+    _X_FALLBACK_COLUMNS = list(cfg["plot"].get("x_fallback_columns") or [])
+    _CALIBRATION_FILES = [n.lower() for n in cfg["timeline"].get("calibration_names") or []]
+
+    LIVE_FRAME_EXT = cfg["live_image"].get("frame_extension") or ".cbf"
+    _LIVE_FRAME_NO_RE = re.compile(r"(\d+)" + re.escape(LIVE_FRAME_EXT) + "$")
+
+    sc.configure(cfg["data_layout"], cfg["spec_parsing"])
+    csig.configure(cfg["signals"])
 
 
 def _color_for(i: int) -> str:
@@ -702,8 +736,9 @@ def _select_scan_list_items(list_widget: QtWidgets.QListWidget, scan_strs: List[
 # Default-selection logic, ported from the web dashboard's JS
 # (extractMotorFromCommand / setXAxisFromScanNum / updatePlotControls) so the
 # native GUI pre-fills the same sensible defaults when a file is loaded.
-_DEFAULT_Y_PRIORITY = ["ic1", "diode", "I0", "I1"]
-_X_FALLBACK_COLUMNS = ["Time", "Epoch", "time", "epoch"]
+# Both lists come from the config's `plot:` section (set by _apply_config()).
+_DEFAULT_Y_PRIORITY: List[str] = []
+_X_FALLBACK_COLUMNS: List[str] = []
 
 
 def _extract_motor_from_command(command: str, available_cols: List[str]) -> Optional[str]:
@@ -740,7 +775,8 @@ def _default_y_columns(available_cols: List[str]) -> List[str]:
 
 # Experiment Summary (Folder Timeline tab), ported from the web dashboard's
 # isCalibration()/buildTimelineSummary()/renderTimelineSummary() logic.
-_CALIBRATION_FILES = ["ceo2", "air", "background", "bg", "empty", "dark"]
+# From the config's timeline.calibration_names (set by _apply_config()).
+_CALIBRATION_FILES: List[str] = []
 
 
 def _is_calibration(spec_file: str) -> bool:
@@ -809,6 +845,10 @@ def _style_summary_chart(panel: "PlotPanel", title: str, y_label: str = ""):
 LIVE_COLORMAPS = ["viridis", "inferno", "magma", "plasma",
                    "cividis", "turbo", "gray", "jet"]
 
+# Detector frame extension to watch, and the regex that pulls the frame
+# number out of a frame's filename -- both from the config's
+# live_image.frame_extension (set by _apply_config()).
+LIVE_FRAME_EXT = ".cbf"
 _LIVE_FRAME_NO_RE = re.compile(r"(\d+)\.cbf$")
 
 
@@ -887,7 +927,7 @@ def _live_find_newest_cbf_fast(folder):
         with os.scandir(folder) as it:
             for e in it:
                 n = e.name
-                if n.endswith(".cbf") and (best is None or n > best):
+                if n.endswith(LIVE_FRAME_EXT) and (best is None or n > best):
                     best = n
     except OSError:
         return None, -1.0
@@ -907,7 +947,7 @@ def _live_find_active_scan_dir(folder):
     best_dir, best_mtime = None, -1.0
     try:
         for root, _dirs, files in os.walk(folder, followlinks=True):
-            if not any(f.endswith(".cbf") for f in files):
+            if not any(f.endswith(LIVE_FRAME_EXT) for f in files):
                 continue
             try:
                 m = os.path.getmtime(root)
@@ -1035,7 +1075,7 @@ class LiveImageLoader(QtCore.QThread):
                     path, mtime = self._locate_recursive(folder)
 
             if path is None:
-                self.status.emit("Searching for .cbf files under %s ..." % folder)
+                self.status.emit("Searching for %s files under %s ..." % (LIVE_FRAME_EXT, folder))
                 time.sleep(max(0.3, interval))
                 continue
 
@@ -1113,7 +1153,7 @@ class LiveImageTab(QtWidgets.QWidget):
         if fabio is None:
             warn = QtWidgets.QLabel(
                 "The 'fabio' package isn't installed, so this tab can't "
-                "read .cbf detector frames. Install it with:\n\n"
+                f"read {LIVE_FRAME_EXT} detector frames. Install it with:\n\n"
                 "    pip install fabio\n\n"
                 "then restart the dashboard to use the Live Image tab."
             )
@@ -1125,8 +1165,9 @@ class LiveImageTab(QtWidgets.QWidget):
         r1 = QtWidgets.QHBoxLayout()
         r1.addWidget(QtWidgets.QLabel("Folder:"))
         self.path_edit = QtWidgets.QLineEdit()
+        example = f", e.g. .../{sc.RAW_DATA_SUBDIRS[0]}" if sc.RAW_DATA_SUBDIRS else ""
         self.path_edit.setPlaceholderText(
-            "Paste a folder of .cbf frames, e.g. .../raw6M")
+            f"Paste a folder of {LIVE_FRAME_EXT} frames{example}")
         self.path_edit.setMinimumWidth(120)
         self.path_edit.returnPressed.connect(self.apply_folder)
         r1.addWidget(self.path_edit, 1)
@@ -1143,8 +1184,9 @@ class LiveImageTab(QtWidgets.QWidget):
 
         self.recurse_cb = QtWidgets.QCheckBox("auto-search subfolders")
         self.recurse_cb.setToolTip(
-            "Always dive into subfolders to find the newest .cbf. (Even "
-            "when off, watching a folder with no .cbf will auto-search.)")
+            f"Always dive into subfolders to find the newest {LIVE_FRAME_EXT}. "
+            f"(Even when off, watching a folder with no {LIVE_FRAME_EXT} will "
+            "auto-search.)")
         self.recurse_cb.toggled.connect(lambda val: self.loader.configure(recurse=val))
         flow.addWidget(self.recurse_cb)
 
@@ -1704,7 +1746,9 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.resize(1400, 900)
 
         # State
-        self.root_path = os.path.expanduser("~")
+        self.root_path = os.path.expanduser(CONFIG["app"].get("default_root") or "~")
+        if not os.path.isdir(self.root_path):
+            self.root_path = os.path.expanduser("~")
         self.current_browse_path = self.root_path
         self.df = None
         self.columns: List[str] = []
@@ -1729,6 +1773,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._is_auto_refresh_tick = False
 
         self._tree_items: Dict[str, tuple] = {}
+        # Tab key (see bcfg.TAB_LABELS) -> its page widget, filled by _add_tab().
+        self._tab_widgets: Dict[str, QtWidgets.QWidget] = {}
         self._timeline_rows: List[Dict] = []
         self._timeline_summary_visible = False
         self._timeline_folder_path: Optional[str] = None
@@ -1769,13 +1815,12 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._summary_timer.timeout.connect(self._summary_refresh_tick)
         self._summary_watch_mtime: Optional[float] = None
 
-        # Summary tab: 5 live channels sourced via chess_signals.py's
-        # get_live_beam_values() (CESR, IC1, IC2, diode, Flow), refreshed
-        # once a second — deliberately a separate, slower timer
-        # from the 0.1s plot-refresh timer above, since these numbers don't
-        # need to move nearly as fast and there's no reason to re-run the
-        # column-matching / (optional) network round-trip 10x/second. Reads
-        # values via chess_signals.get_live_beam_values().
+        # Summary tab: the config's live channels, sourced via
+        # chess_signals.get_live_values(), refreshed once a second —
+        # deliberately a separate, slower timer from the 0.1s plot-refresh
+        # timer above, since these numbers don't need to move nearly as
+        # fast and there's no reason to re-run the column-matching /
+        # (optional) network round-trip 10x/second.
         #
         # Runs continuously for the whole lifetime of the app, NOT just
         # while the Summary tab is visible (unlike _summary_timer above) --
@@ -1861,34 +1906,43 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
         # Global shortcuts to jump to tabs
         sc_plot = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+P"), self)
-        sc_plot.activated.connect(lambda: self._goto_tab("SPEC Plot"))
+        sc_plot.activated.connect(lambda: self._goto_tab("plot"))
         sc_scaninfo = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+T"), self)
-        sc_scaninfo.activated.connect(lambda: self._goto_tab("Scan Info"))
+        sc_scaninfo.activated.connect(lambda: self._goto_tab("scan_info"))
         sc_export = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+E"), self)
-        sc_export.activated.connect(lambda: self._goto_tab("Export"))
+        sc_export.activated.connect(lambda: self._goto_tab("export"))
 
     def _show_shortcuts(self):
         QtWidgets.QMessageBox.information(
             self, "Keyboard Shortcuts",
             "Ctrl+O — Set root / browse\n"
-            "Ctrl+P — Jump to SPEC Plot tab\n"
-            "Ctrl+T — Jump to Scan Info tab\n"
-            "Ctrl+E — Jump to Export tab",
+            f"Ctrl+P — Jump to {self._tab_label('plot')} tab\n"
+            f"Ctrl+T — Jump to {self._tab_label('scan_info')} tab\n"
+            f"Ctrl+E — Jump to {self._tab_label('export')} tab",
         )
 
     def _show_about(self):
         QtWidgets.QMessageBox.information(
             self, "About",
-            f"{APP_TITLE}\n\nNative PyQt5 GUI for browsing SPEC scan files "
-            "from the QM2 beamline (CHESS ID4B). Read-only — never modifies "
-            "source data.",
+            f"{APP_TITLE}\n\n{CONFIG['app'].get('about_text', '')}\n\n"
+            f"Config: {CONFIG.get('_path', '')}",
         )
 
-    def _goto_tab(self, name: str):
-        for i in range(self.tabs.count()):
-            if self.tabs.tabText(i) == name:
-                self.tabs.setCurrentIndex(i)
-                return
+    @staticmethod
+    def _tab_label(key: str) -> str:
+        for entry in CONFIG["tabs"]:
+            if entry["key"] == key:
+                return entry["label"]
+        return bcfg.TAB_LABELS[key]
+
+    def _add_tab(self, key: str, widget: QtWidgets.QWidget):
+        self._tab_widgets[key] = widget
+        self.tabs.addTab(widget, self._tab_label(key))
+
+    def _goto_tab(self, key: str):
+        widget = self._tab_widgets.get(key)
+        if widget is not None and self.tabs.indexOf(widget) != -1:
+            self.tabs.setCurrentWidget(widget)
 
     # ------------------------------------------------------------------
     # Theme
@@ -2014,34 +2068,24 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._build_slack_alerts_tab()
         self._build_export_tab()
 
-        # Re-order the tabs on-screen to match the user's requested
-        # sequence, WITHOUT touching the _build_X_tab() call order above --
-        # that order has real dependencies (e.g. _build_summary_tab() reads
+        # Re-order the tabs on-screen to match the config's `tabs:` list,
+        # WITHOUT touching the _build_X_tab() call order above -- that order
+        # has real dependencies (e.g. _build_summary_tab() reads
         # self.live_image_tab, so _build_live_image_tab() must still run
         # first) that are independent of what order the tabs should visually
-        # appear in. This just rearranges the already-built tabs by their
-        # text label after everything exists.
-        _tab_display_order = [
-            "Home",
-            "Overall Summary",
-            "SPEC Plot",
-            "Live Image (Pilatus)",
-            "Folder Timeline",
-            "Scan Info",
-            "Motor Positions",
-            "Export",
-            "Slack Alerts",
-        ]
-        for _target_index, _label in enumerate(_tab_display_order):
-            _current_index = None
-            for _i in range(self.tabs.count()):
-                if self.tabs.tabText(_i) == _label:
-                    _current_index = _i
-                    break
-            if _current_index is not None and _current_index != _target_index:
-                _widget = self.tabs.widget(_current_index)
-                self.tabs.removeTab(_current_index)
-                self.tabs.insertTab(_target_index, _widget, _label)
+        # appear in. Tabs with `show: false` are still built (other code
+        # refers to their widgets) but taken off the tab bar.
+        target_index = 0
+        for entry in CONFIG["tabs"]:
+            widget = self._tab_widgets[entry["key"]]
+            current_index = self.tabs.indexOf(widget)
+            if not entry["show"]:
+                self.tabs.removeTab(current_index)
+                continue
+            if current_index != target_index:
+                self.tabs.removeTab(current_index)
+                self.tabs.insertTab(target_index, widget, entry["label"])
+            target_index += 1
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -2052,7 +2096,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         (see LiveImageTab above) so both live views are available in one
         window."""
         self.live_image_tab = LiveImageTab()
-        self.tabs.addTab(self.live_image_tab, "Live Image (Pilatus)")
+        self._add_tab("live_image", self.live_image_tab)
 
     def _build_summary_tab(self):
         """"Summary" tab: a minimal, watch-only view with the latest-scan
@@ -2076,153 +2120,58 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.summary_status_label.setProperty("secondaryText", True)
         layout.addWidget(self.summary_status_label)
 
-        # "Beam Condition" section header, added per the user's request so
-        # this row of cards is clearly labeled rather than left to speak
-        # for itself. Plain QLabel added directly to the (vertical) tab
-        # layout, so it's left-aligned above the row like the other
-        # section labels here.
-        self.beam_condition_header = QtWidgets.QLabel("Beam Condition")
-        self.beam_condition_header.setStyleSheet(
-            "font-size: 11pt; font-weight: bold;"
-        )
-        layout.addWidget(self.beam_condition_header)
-
-        # 4 live beam-monitor readouts (CESR, IC1, IC2, diode), refreshed
-        # once a second by _beam_signals_tick() via chess_signals.py. Each
-        # is its own small boxed "card" with a name and a big value; a
-        # checkbox lets the (opt-in, on-site-only) direct network fetch
-        # from signals.chess.cornell.edu be turned on to fill in any
-        # channel the loaded SPEC file's own columns don't have. Flow is
-        # also one of chess_signals.CHANNEL_ORDER (its value still comes
-        # from get_live_beam_values() exactly like these 4), but per the
-        # user's request it's displayed below with the temperature
-        # readouts rather than in this row -- skipped here.
-        beam_row = QtWidgets.QHBoxLayout()
-        self.beam_signal_labels: Dict[str, QtWidgets.QLabel] = {}
-        for canonical in csig.CHANNEL_ORDER:
-            if canonical == "flow":
-                continue
-            box = QtWidgets.QFrame()
-            box.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            box_layout = QtWidgets.QVBoxLayout(box)
-            box_layout.setContentsMargins(10, 6, 10, 6)
-            name_lbl = QtWidgets.QLabel(csig.CHANNEL_LABELS[canonical])
-            name_lbl.setProperty("secondaryText", True)
-            value_lbl = QtWidgets.QLabel("—")
-            value_lbl.setStyleSheet("font-size: 12pt; font-weight: bold;")
-            box_layout.addWidget(name_lbl)
-            box_layout.addWidget(value_lbl)
-            beam_row.addWidget(box)
-            self.beam_signal_labels[canonical] = value_lbl
-        beam_row.addStretch(1)
+        # One titled row of small boxed "cards" per `summary.groups` entry
+        # in the config, each showing one channel from `signals.channels`
+        # (name + big value), refreshed once a second by
+        # _beam_signals_tick() via chess_signals.py. A group with no
+        # channels still shows its title, so every configured section is
+        # visible even when it's blank.
+        self.signal_labels: Dict[str, List[QtWidgets.QLabel]] = {}
         self.beam_network_checkbox = QtWidgets.QCheckBox(
             "Try live network fetch (on-site/CHESS network only)"
         )
-        self.beam_network_checkbox.setChecked(True)
-        # Enabled and checked by default per the user's request:
-        # chess_signals.BEAM_PV_MAP now has real, user-confirmed PVs for
-        # ic1/ic2/diode (ID4B_CNT00/02/03_VLT, x10000 multiplier, from a
-        # script the user shared whose own ALL_PV_MAPPING contains exactly
-        # this mapping). CESR now also has a PV (ID4B_CNT01_VLT), given
-        # directly by the user in chat rather than from a script's own
-        # mapping dict -- NOT independently verified, and its multiplier
-        # is an unconfirmed 1x placeholder -- see chess_signals.py's
-        # module docstring / BEAM_PV_MAP comment for the full history and
-        # what still needs sanity-checking. It only defaults on -- the
-        # checkbox is still there, and still un-clicks the same way, for
-        # anyone off-site or who wants to fall back to SPEC-file-only
-        # values (per the user's own "if needed I can check out" note).
-        #
-        # IMPORTANT (network-first priority): when checked, all 4 channels
-        # now come from the live signals.chess.cornell.edu reading whenever
-        # the network provides one -- overriding the loaded SPEC file's
-        # value for that channel, not just filling in gaps. This matters
-        # because a loaded SPEC file's value is a static snapshot of its
-        # last row that generally never changes again, so if network
-        # readings only filled gaps (the old behavior), checking this box
-        # would have no visible effect at all for a file that already had
-        # matching columns -- which is virtually every real ID4B file.
+        self.beam_network_checkbox.setChecked(
+            bool(CONFIG["signals"].get("network_fetch_default", True))
+        )
+        # Network-first priority: when checked, a channel's live reading
+        # overrides the loaded SPEC file's value rather than just filling
+        # gaps, since the SPEC file's last row is a static snapshot that
+        # generally never changes again (see csig.get_live_values()).
         self.beam_network_checkbox.setToolTip(
-            "On by default -- only finds anything on-site/the CHESS "
-            "network, so uncheck this if you're off-site. When checked, "
-            "CESR/IC1/IC2/Diode are read live from "
-            "signals.chess.cornell.edu and that live value overrides the "
-            "loaded SPEC file's value for each channel (falling back to "
-            "the SPEC file's value only if the network request for that "
-            "channel fails or is unreachable). CESR's PV and multiplier "
-            "are less certain than IC1/IC2/Diode's -- worth double-"
-            "checking its live reading against new-status.chess.cornell."
-            "edu/ID4B. Flow Rate (shown below with the temperature "
-            "readouts) has no known network PV yet, so it always comes "
-            "from the loaded SPEC file's own column regardless of this "
-            "checkbox."
+            "Only finds anything on-site/the CHESS network, so uncheck "
+            "this if you're off-site. When checked, every channel with a "
+            f"PV in the beamline config is read live from {csig.BASE_URL} "
+            "and that live value overrides the loaded SPEC file's value "
+            "(falling back to the SPEC file's value only if the network "
+            "request for that channel fails or is unreachable). Channels "
+            "without a PV always come from the SPEC file."
         )
-        beam_row.addWidget(self.beam_network_checkbox)
-        layout.addLayout(beam_row)
 
-        # 3 live cryostat temperature readouts (Stage 1 (A), Sample Temp,
-        # Stage 2 (C)) plus Flow Rate -- the same small boxed-card readout
-        # style as the beam row above, not a warning-style banner like
-        # no_beam_banner below. Placed *before* the No Beam banner, and
-        # with Flow Rate included in this row rather than the beam row
-        # above, per the user's explicit request. Refreshed by the same
-        # _beam_signals_tick(). Flow Rate's value still comes from
-        # chess_signals.get_live_beam_values() (it's one of CHANNEL_ORDER,
-        # not TEMPERATURE_ORDER) -- its QLabel is stored in
-        # self.beam_signal_labels["flow"], not self.temperature_signal_labels,
-        # so the existing generic beam-values refresh loop in
-        # _beam_signals_tick() keeps updating it correctly with no other
-        # code changes needed; only where the card is built/placed changed.
-        #
-        # "Temperature Information" section header, added per the user's
-        # request alongside "Beam Condition" above, for the same reason --
-        # a clear, explicit label above the row rather than an unlabeled
-        # group of cards.
-        self.temperature_info_header = QtWidgets.QLabel(
-            "Temperature Information"
-        )
-        self.temperature_info_header.setStyleSheet(
-            "font-size: 11pt; font-weight: bold;"
-        )
-        layout.addWidget(self.temperature_info_header)
-
-        temp_row = QtWidgets.QHBoxLayout()
-        self.temperature_signal_labels: Dict[str, QtWidgets.QLabel] = {}
-        for canonical in list(csig.TEMPERATURE_ORDER) + ["flow"]:
-            is_temperature = canonical in csig.TEMPERATURE_LABELS
-            label_text = (
-                csig.TEMPERATURE_LABELS[canonical] if is_temperature
-                else csig.CHANNEL_LABELS[canonical]
-            )
-            box = QtWidgets.QFrame()
-            box.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            box_layout = QtWidgets.QVBoxLayout(box)
-            box_layout.setContentsMargins(10, 6, 10, 6)
-            name_lbl = QtWidgets.QLabel(label_text)
-            name_lbl.setProperty("secondaryText", True)
-            value_lbl = QtWidgets.QLabel("—")
-            value_lbl.setStyleSheet("font-size: 12pt; font-weight: bold;")
-            box_layout.addWidget(name_lbl)
-            box_layout.addWidget(value_lbl)
-            temp_row.addWidget(box)
-            if is_temperature:
-                self.temperature_signal_labels[canonical] = value_lbl
-            else:
-                self.beam_signal_labels[canonical] = value_lbl
-        temp_row.addStretch(1)
-        layout.addLayout(temp_row)
+        groups = CONFIG["summary"]["groups"]
+        for i, group in enumerate(groups):
+            header = QtWidgets.QLabel(group.get("title") or "")
+            header.setStyleSheet("font-size: 11pt; font-weight: bold;")
+            layout.addWidget(header)
+            row = QtWidgets.QHBoxLayout()
+            for canonical in group.get("channels") or []:
+                row.addWidget(self._make_signal_card(canonical))
+            row.addStretch(1)
+            if i == 0:
+                # Governs every channel, not just this group's; it sits at
+                # the end of the first row.
+                row.addWidget(self.beam_network_checkbox)
+            layout.addLayout(row)
+        if not groups:
+            layout.addWidget(self.beam_network_checkbox)
 
         # "No Beam" banner -- hidden by default, shown/hidden every second
-        # by _beam_signals_tick() based on csig.is_no_beam(cesr_value).
-        # Deliberately a persistent, self-clearing banner rather than a
-        # popup/dialog: _beam_signals_tick() runs every second, and a
-        # QMessageBox popping up every second for however long there's no
-        # beam (potentially hours) would be extremely disruptive. This
-        # gives the same "tell me when there's no beam" signal without
-        # that -- it just appears while CESR reads near 0 and disappears
-        # on its own once beam returns, no clicking needed. Placed after
-        # the temperature/Flow Rate row per the user's request.
-        self.no_beam_banner = QtWidgets.QLabel("⚠ No Beam — CESR reading ≈ 0")
+        # by _beam_signals_tick() based on csig.is_no_beam() of the
+        # config's signals.no_beam.channel. Deliberately a persistent,
+        # self-clearing banner rather than a popup/dialog, which would pop
+        # up every second for however long there's no beam.
+        no_beam_channel = CONFIG["signals"]["no_beam"].get("channel")
+        no_beam_label = csig.CHANNELS[no_beam_channel]["label"] if no_beam_channel else ""
+        self.no_beam_banner = QtWidgets.QLabel(f"⚠ No Beam — {no_beam_label} reading ≈ 0")
         self.no_beam_banner.setStyleSheet(
             "background-color: #8b0000; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 8px 12px; border-radius: 4px;"
@@ -2256,7 +2205,23 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.live_image_tab.register_mirror(self.summary_imv)
 
         self.summary_tab_widget = w
-        self.tabs.addTab(w, "Overall Summary")
+        self._add_tab("summary", w)
+
+    def _make_signal_card(self, canonical: str) -> QtWidgets.QFrame:
+        """One Summary-tab readout card: the channel's label and a big
+        value, registered in self.signal_labels for _beam_signals_tick()."""
+        box = QtWidgets.QFrame()
+        box.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        box_layout = QtWidgets.QVBoxLayout(box)
+        box_layout.setContentsMargins(10, 6, 10, 6)
+        name_lbl = QtWidgets.QLabel(csig.CHANNELS[canonical]["label"])
+        name_lbl.setProperty("secondaryText", True)
+        value_lbl = QtWidgets.QLabel("—")
+        value_lbl.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        box_layout.addWidget(name_lbl)
+        box_layout.addWidget(value_lbl)
+        self.signal_labels.setdefault(canonical, []).append(value_lbl)
+        return box
 
     def _build_slack_alerts_tab(self):
         """Its own tab (moved out of Overall Summary per the user's
@@ -2279,7 +2244,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(w)
 
         intro = QtWidgets.QLabel(
-            "Posts a Slack message whenever the Overall Summary tab's "
+            f"Posts a Slack message whenever the {self._tab_label('summary')} tab's "
             "\"No Beam\" banner turns on (beam lost) or off again (beam "
             "restored) -- one alert per transition, not one per second."
         )
@@ -2339,7 +2304,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._load_remembered_slack_settings()
 
         self.slack_alerts_tab_widget = w
-        self.tabs.addTab(w, "Slack Alerts")
+        self._add_tab("slack_alerts", w)
 
     def _on_tab_changed(self, _index: int):
         """Start/stop the Summary tab's 0.1s plot-refresh timer as it
@@ -2482,17 +2447,15 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._auto_link_live_image_folder(path)
 
     def _auto_link_live_image_folder(self, spec_path: str):
-        """Automatically point the Live Image (Pilatus) tab's watched
-        folder at the folder of .cbf frames that goes with the SPEC file
-        just loaded, so there's no need to Browse for it by hand -- the
-        images always live alongside the SPEC file for a given experiment.
-        Pilatus frames are conventionally written into a "raw6M" subfolder
-        right next to the SPEC file (the QM2/ID4B layout), so that's tried
-        first; a few other common subfolder names already used elsewhere
-        in this dashboard's own scan-data-folder heuristics
-        (sc.find_scan_data / sc.spec_subfolders) are tried next, and the
-        SPEC file's own directory is the last-resort fallback so something
-        is always watched even if none of those exist. Runs on every file
+        """Automatically point the Live Image tab's watched folder at the
+        folder of detector frames that goes with the SPEC file just loaded,
+        so there's no need to Browse for it by hand -- the images always
+        live alongside the SPEC file for a given experiment. The config's
+        data_layout.raw_data_subdirs (e.g. "raw6M" for QM2's Pilatus) are
+        tried in order -- the same list sc.find_scan_data /
+        sc.spec_subfolders search -- and the SPEC file's own directory is
+        the last-resort fallback so something is always watched even if
+        none of those exist. Runs on every file
         load (not just the first), so switching to a different
         experiment's SPEC file re-points the watch at that experiment's
         own images instead of leaving it on the previous one. Also force-
@@ -2506,9 +2469,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         if tab is None or fabio is None or not hasattr(tab, "path_edit"):
             return
         spec_parent = os.path.dirname(os.path.abspath(spec_path))
-        candidate_names = ["raw6M", "tiffs", "rawpil", "data", "raw", "images"]
         folder = None
-        for name in candidate_names:
+        for name in sc.RAW_DATA_SUBDIRS:
             candidate = os.path.join(spec_parent, name)
             if os.path.isdir(candidate):
                 folder = candidate
@@ -2666,7 +2628,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         scan_numbers = self._scan_numbers_for(self.df)
         if not scan_numbers:
             return
-        self._goto_tab("SPEC Plot")
+        self._goto_tab("plot")
         # Snapshot whatever curve(s) are still on screen from *before* this
         # refresh — self.df has already been swapped to the new data by
         # _apply_loaded_data() above, but do_plot() hasn't redrawn the chart
@@ -2737,11 +2699,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
 
-        subtitle = QtWidgets.QLabel(
-            "A native desktop viewer for SPEC scan files from the QM2 beamline "
-            "(CHESS ID4B), but it works with any standard SPEC-format file. "
-            "This is a read-only tool — it never modifies your experiment data."
-        )
+        subtitle = QtWidgets.QLabel(CONFIG["app"].get("home_subtitle") or "")
         subtitle.setWordWrap(True)
         subtitle.setProperty("secondaryText", True)
         subtitle.setStyleSheet("font-size: 13px;")
@@ -2783,14 +2741,9 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         features_grid.setHorizontalSpacing(20)
         features_grid.setVerticalSpacing(8)
         feature_items = [
-            ("Overall Summary", "At-a-glance Beam Condition (CESR/IC1 (Ion Chamber 1)/IC2 (Ion Chamber 2)/Diode) and Temperature Information (Stage 1 (A)/Sample Temp/Stage 2 (C)/Flow Rate) readouts, refreshed live, with a dark-red No Beam banner when CESR reads near zero — plus a mini plot that always follows the latest scan."),
-            ("SPEC Plot", "Pick X/Y columns, overlay multiple scans, switch line/scatter/line+scatter/bar, normalize, or use log scale. Sensible defaults are picked automatically when you load a file. Optionally overlay a Gaussian or Lorentzian peak fit (via SciPy), a scan from a separately-loaded reference file, or — during Auto-Refresh — the previous plot as a ghost overlay for quick before/after comparison. Save or copy the chart itself as a PNG image."),
-            ("Live Image (Pilatus)", "Watch a folder of .cbf detector frames and see the newest one update in real time, with colormap choices and an optional ROI monitor."),
-            ("Folder Timeline", "Every scan across every SPEC file in a folder, sorted chronologically, with a data-folder lookup and a downloadable PDF experiment summary."),
-            ("Scan Info", "Every scan's command, timestamp, temperature, count time, comments, and point count."),
-            ("Motor Positions", "Per-scan motor positions read from the SPEC header."),
-            ("Export", "Export all data, just the plotted data, or a chosen set of scans/columns to CSV."),
-            ("Slack Alerts", "Configure a Slack Bot Token and channel, then get a Slack message automatically whenever beam is lost or restored — including the live CESR mA reading and the current status text from new-status.chess.cornell.edu/ID4B when it can be fetched. Runs continuously in the background regardless of which tab is open."),
+            (entry["label"], entry["description"])
+            for entry in CONFIG["tabs"]
+            if entry["key"] != "home" and entry["show"]
         ]
         for i, (name, desc) in enumerate(feature_items):
             name_lbl = QtWidgets.QLabel(f"● {name}")
@@ -2806,8 +2759,9 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         layout.addSpacing(10)
         shortcuts_label = QtWidgets.QLabel(
             "Keyboard shortcuts:   Ctrl+O — set root / browse    •    "
-            "Ctrl+P — jump to SPEC Plot    •    Ctrl+T — jump to Scan Info    •    "
-            "Ctrl+E — jump to Export"
+            f"Ctrl+P — jump to {self._tab_label('plot')}    •    "
+            f"Ctrl+T — jump to {self._tab_label('scan_info')}    •    "
+            f"Ctrl+E — jump to {self._tab_label('export')}"
         )
         shortcuts_label.setWordWrap(True)
         shortcuts_label.setProperty("secondaryText", True)
@@ -2815,7 +2769,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         layout.addWidget(shortcuts_label)
 
         layout.addStretch(1)
-        self.tabs.addTab(w, "Home")
+        self._add_tab("home", w)
 
     # ------------------------------------------------------------------
     # Scan Info tab
@@ -2831,7 +2785,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.scan_info_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.scan_info_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         layout.addWidget(self.scan_info_table)
-        self.tabs.addTab(w, "Scan Info")
+        self._add_tab("scan_info", w)
 
     def _refresh_scan_info_table(self):
         rows = sc.build_scan_table(self.scan_info, self.df)
@@ -2859,7 +2813,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.motor_table = QtWidgets.QTableWidget(0, 0)
         self.motor_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.motor_table)
-        self.tabs.addTab(w, "Motor Positions")
+        self._add_tab("motor_positions", w)
 
     def _refresh_motor_positions_table(self):
         motors_meta, scans_data = sc.build_motor_positions(self.metadata, self.scan_info)
@@ -3207,7 +3161,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.plot_splitter.setStretchFactor(1, 1)
         self.plot_splitter.setSizes([340, 900])
 
-        self.tabs.addTab(w, "SPEC Plot")
+        self._add_tab("plot", w)
 
     def _refresh_plot_controls(self):
         self._suspend_auto_plot = True
@@ -3743,7 +3697,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.slack_test_btn.setEnabled(False)
         ok, detail = self._send_slack_message(
             token, channel,
-            "🔧 Test message from QM2 Dashboard -- Slack Alerts are "
+            f"🔧 Test message from {APP_TITLE} -- Slack Alerts are "
             "configured correctly.",
         )
         self.slack_test_btn.setEnabled(True)
@@ -3759,12 +3713,13 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
                 self, "Slack Alerts", f"Could not send test message: {detail}"
             )
 
-    def _maybe_alert_beam_slack(self, no_beam: bool, cesr_value: Optional[float] = None):
+    def _maybe_alert_beam_slack(self, no_beam: bool, value: Optional[float] = None):
         """Called once per _beam_signals_tick() with the current no-beam
-        state (same csig.is_no_beam(cesr_value) boolean that drives
-        no_beam_banner's visibility) and the live CESR mA reading that
-        state was computed from (so the alert text can show the real
-        number instead of a generic placeholder). Posts a Slack message
+        state (same csig.is_no_beam(value) boolean that drives
+        no_beam_banner's visibility) and the live reading of the config's
+        signals.no_beam.channel that state was computed from (so the alert
+        text can show the real number instead of a generic placeholder).
+        Posts a Slack message
         only on a *transition* -- beam just lost (False -> True) or beam
         just restored (True -> False) -- never on every tick, so a
         no-beam period lasting hours doesn't spam the channel once a
@@ -3793,22 +3748,26 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         channel = self.slack_channel_edit.text().strip() or SLACK_DEFAULT_CHANNEL
         if not token:
             return
-        cesr_text = f"{cesr_value:,.3f} mA" if cesr_value is not None else "unavailable"
+        no_beam_cfg = CONFIG["signals"]["no_beam"]
+        label = csig.CHANNELS[no_beam_cfg["channel"]]["label"]
+        units = no_beam_cfg.get("units") or ""
+        value_text = f"{value:,.3f} {units}".rstrip() if value is not None else "unavailable"
+        where = f"{APP_TITLE}, {CONFIG['beamline'].get('station', '')}".rstrip(", ")
         if no_beam:
-            text = f"🚨 No Beam -- CESR reading {cesr_text} (QM2 Dashboard, ID4B)."
+            text = f"🚨 No Beam -- {label} reading {value_text} ({where})."
         else:
-            text = f"✅ Beam Restored -- CESR reading {cesr_text} (QM2 Dashboard, ID4B)."
-        # Append the actual current status message from
-        # new-status.chess.cornell.edu/ID4B (e.g. "Investigating",
-        # "Refilling", operator notes, ...) when it can be fetched --
-        # silently omitted (falls back to the generic text above only) if
-        # the page can't be reached or its markup doesn't match any known
-        # pattern. See chess_signals.fetch_beam_status_message()'s
+            text = f"✅ Beam Restored -- {label} reading {value_text} ({where})."
+        # Append the actual current status message from the config's
+        # signals.status_page_url (e.g. "Investigating", "Refilling",
+        # operator notes, ...) when it can be fetched -- silently omitted
+        # (falls back to the generic text above only) if no page is
+        # configured, it can't be reached, or its markup doesn't match any
+        # known pattern. See chess_signals.fetch_beam_status_message()'s
         # docstring for why this can come back empty even on-site (the
         # page may need JS execution to show the text).
         status_message = csig.fetch_beam_status_message()
         if status_message:
-            text += f"\nStatus (new-status.chess.cornell.edu/ID4B): {status_message}"
+            text += f"\nStatus ({csig.NEW_STATUS_URL}): {status_message}"
         ok, detail = self._send_slack_message(token, channel, text)
         stamp = time.strftime("%H:%M:%S")
         if ok:
@@ -3817,105 +3776,62 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             self.slack_status_label.setText(f"❌ Alert failed at {stamp}: {detail}")
 
     def _beam_signals_tick(self):
-        """Runs every 1s while the Summary tab is visible. Reads the live
-        beam-monitor values (CESR, IC1, IC2, diode, Flow Rate) via
-        chess_signals.get_live_beam_values() and updates the readout
-        labels -- Flow Rate's label lives in self.beam_signal_labels just
-        like the other 4 (only its card is displayed in the temperature
-        row, per the user's request; the value-refresh path is unchanged).
-        Checks the currently loaded SPEC file's own columns
+        """Runs every 1s for the whole life of the app. Reads the live value
+        of every channel in the config's signals.channels via
+        chess_signals.get_live_values() and updates the Summary tab's
+        readout cards. Checks the currently loaded SPEC file's own columns
         (self.df/self.columns); if the "Try live network fetch" checkbox is
-        checked, also makes a direct network request to
-        signals.chess.cornell.edu for all channels and, for each one,
-        that live network value OVERRIDES the SPEC-file value (network-
-        first), falling back to the SPEC-file value only if the network
-        request for that channel fails/finds nothing. Off by default since
-        the network fetch only finds anything on-site/the CHESS network.
-        CESR's PV (ID4B_CNT01_VLT) came directly from the user in chat
-        rather than a script's own mapping dict like IC1/IC2/diode's did,
-        and is NOT independently verified, with an unconfirmed 1x
-        multiplier placeholder -- so a CESR reading from the network is
-        more worth double-checking (e.g. against
-        new-status.chess.cornell.edu/ID4B) than IC1/IC2/Diode's.
+        checked, also makes a direct network request for every channel
+        with a PV and, for each one, that live network value OVERRIDES the
+        SPEC-file value (network-first), falling back to the SPEC-file
+        value only if the network request for that channel fails/finds
+        nothing. See csig.get_live_values() for why network-first.
 
-        Network-first matters here: a loaded SPEC file's value is a static
-        snapshot of its last row that generally never changes again, so a
-        SPEC-first/fill-gaps-only version of this (the original
-        implementation) meant checking the network-fetch box had NO visible
-        effect at all on any channel the SPEC file already had a column for
-        -- which is essentially always true for real ID4B files. That made
-        the checkbox silently do nothing, matching a user report of "none
-        of the values changed" after checking it.
-
-        Also toggles the "No Beam" banner: shown whenever the CESR reading
-        (if any) is near enough to 0 per chess_signals.is_no_beam() -- a
-        small tolerance rather than an exact 0.0 match, since a genuinely-
-        no-beam CESR/ion-chamber/diode reading can still wander a bit
+        Also toggles the "No Beam" banner: shown whenever the reading of
+        the config's signals.no_beam.channel (if any) is near enough to 0
+        per chess_signals.is_no_beam() -- a small tolerance rather than an
+        exact 0.0 match, since a genuinely-no-beam reading can still wander
         around a small "dark current" baseline. The banner is left hidden
-        (not shown as "no beam") when there's simply no CESR reading at
-        all (None) -- that's "unknown", not confirmed no-beam.
-
-        Also refreshes the 3 cryostat temperature readouts (Stage 1 (A)/
-        Sample Temp/Stage 2 (C)) the same way, via
-        chess_signals.get_live_temperature_values() -- same SPEC-file-
-        first-then-network-overrides logic, same "Try live network fetch"
-        checkbox governs both (it's a general on-site/CHESS-network
-        toggle, not beam-specific), just a separate PV map
-        (TEMPERATURE_PV_MAP) and separate SPEC-column patterns so this
-        can't affect beam-channel matching. Flow Rate's card sits visually
-        in this same row (see _build_summary_tab()), but it's refreshed by
-        the beam-values loop above it, not this temperature loop, since
-        its value still comes from get_live_beam_values()."""
+        (not shown as "no beam") when there's no reading at all (None) --
+        that's "unknown", not confirmed no-beam."""
         use_network = bool(
             getattr(self, "beam_network_checkbox", None)
             and self.beam_network_checkbox.isChecked()
         )
-        values = csig.get_live_beam_values(self.df, self.columns, use_network=use_network)
-        for canonical, lbl in getattr(self, "beam_signal_labels", {}).items():
+        values = csig.get_live_values(self.df, self.columns, use_network=use_network)
+        for canonical, labels in getattr(self, "signal_labels", {}).items():
             info = values.get(canonical) or {}
             value = info.get("value")
             source = info.get("source")
             column = info.get("column")
             if value is None:
-                lbl.setText("—")
-                lbl.setToolTip("No live value (no matching SPEC column" +
-                                (", network fetch off)" if not use_network
-                                 else " and network fetch found nothing)"))
+                text = "—"
+                tooltip = ("No live value (no matching SPEC column" +
+                           (", network fetch off)" if not use_network
+                            else " and network fetch found nothing)"))
             else:
-                lbl.setText(f"{value:,.2f}")
+                text = f"{value:,.2f}"
                 # Names the exact SPEC column (or PV) the number came from,
                 # so a wrong-looking value can be diagnosed at a glance --
                 # e.g. it matched some other, differently-numbered column
                 # by mistake -- instead of just being trusted blindly.
                 if source == "spec":
-                    lbl.setToolTip(f"Source: loaded SPEC file, column \"{column}\"")
+                    tooltip = f"Source: loaded SPEC file, column \"{column}\""
                 else:
-                    lbl.setToolTip(f"Source: signals.chess.cornell.edu (live network), PV {column}")
+                    tooltip = f"Source: {csig.BASE_URL} (live network), PV {column}"
+            for lbl in labels:
+                lbl.setText(text)
+                lbl.setToolTip(tooltip)
 
-        cesr_value = (values.get("cesr") or {}).get("value")
-        no_beam = csig.is_no_beam(cesr_value)
+        no_beam_channel = CONFIG["signals"]["no_beam"].get("channel")
+        if not no_beam_channel:
+            return
+        no_beam_value = (values.get(no_beam_channel) or {}).get("value")
+        no_beam = csig.is_no_beam(no_beam_value)
         banner = getattr(self, "no_beam_banner", None)
         if banner is not None:
             banner.setVisible(no_beam)
-        self._maybe_alert_beam_slack(no_beam, cesr_value)
-
-        temp_values = csig.get_live_temperature_values(self.df, self.columns, use_network=use_network)
-        for canonical, lbl in getattr(self, "temperature_signal_labels", {}).items():
-            info = temp_values.get(canonical) or {}
-            value = info.get("value")
-            source = info.get("source")
-            column = info.get("column")
-            if value is None:
-                lbl.setText("—")
-                lbl.setToolTip("No live value (no matching SPEC column" +
-                                (", network fetch off)" if not use_network
-                                 else " and network fetch found nothing)"))
-            else:
-                lbl.setText(f"{value:,.2f}")
-                if source == "spec":
-                    lbl.setToolTip(f"Source: loaded SPEC file, column \"{column}\"")
-                else:
-                    lbl.setToolTip(f"Source: signals.chess.cornell.edu (live network), PV {column}")
+        self._maybe_alert_beam_slack(no_beam, no_beam_value)
 
     def _render_summary_plot(self):
         """Draw the newest scan into the Summary tab's own PlotPanel, using
@@ -4073,7 +3989,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.timeline_summary_scroll.setWidget(self.timeline_summary_content)
         layout.addWidget(self.timeline_summary_scroll, 3)
 
-        self.tabs.addTab(w, "Folder Timeline")
+        self._add_tab("timeline", w)
 
     def load_timeline(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Browse Folder", self.current_browse_path)
@@ -4704,7 +4620,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         btn_selected.clicked.connect(self.export_selected)
         layout.addWidget(btn_selected)
 
-        self.tabs.addTab(w, "Export")
+        self._add_tab("export", w)
 
     def _refresh_export_controls(self):
         scan_numbers = self._scan_numbers_for(self.df)
@@ -4974,7 +4890,18 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
+    parser = argparse.ArgumentParser(description="SPEC beamline dashboard")
+    parser.add_argument(
+        "--config", default=bcfg.DEFAULT_CONFIG_PATH,
+        help="beamline YAML config (default: %(default)s)",
+    )
+    args, qt_args = parser.parse_known_args()
+    try:
+        _apply_config(bcfg.load_config(args.config))
+    except (bcfg.ConfigError, re.error) as exc:
+        sys.exit(f"Config error: {exc}")
+
+    app = QtWidgets.QApplication(sys.argv[:1] + qt_args)
     app.setApplicationName(APP_TITLE)
     app.setStyle("Fusion")
     app.setStyleSheet(_build_qss())

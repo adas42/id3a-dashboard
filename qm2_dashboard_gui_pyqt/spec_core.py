@@ -29,6 +29,39 @@ from scipy.optimize import curve_fit
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Beamline-specific settings, set by configure() from the beamline YAML
+# config's `data_layout:` and `spec_parsing:` sections (configs/*.yaml)
+# ─────────────────────────────────────────────────────────────────────────
+
+# Raw-data subfolders next to a SPEC file, tried in order.
+RAW_DATA_SUBDIRS: List[str] = []
+# Further scan-data search paths; "{spec}" is the SPEC file's base name.
+EXTRA_SCAN_SEARCH_DIRS: List[str] = []
+# A scan's data folder name; fields {spec} and {scan}.
+SCAN_FOLDER_NAME = "{spec}_{scan:03d}"
+# Run on each scan's #C comments; group 1 is the temperature setpoint.
+_TEMPERATURE_COMMENT_RE: Optional["re.Pattern"] = None
+
+
+def configure(data_layout: Dict[str, Any], spec_parsing: Dict[str, Any]) -> None:
+    """Apply the beamline config's data-folder layout and SPEC-comment
+    parsing settings."""
+    global RAW_DATA_SUBDIRS, EXTRA_SCAN_SEARCH_DIRS, SCAN_FOLDER_NAME, _TEMPERATURE_COMMENT_RE
+    RAW_DATA_SUBDIRS = list(data_layout.get("raw_data_subdirs") or [])
+    EXTRA_SCAN_SEARCH_DIRS = list(data_layout.get("extra_scan_search_dirs") or [])
+    SCAN_FOLDER_NAME = data_layout.get("scan_folder_name") or SCAN_FOLDER_NAME
+    regex = spec_parsing.get("temperature_comment_regex")
+    _TEMPERATURE_COMMENT_RE = re.compile(regex) if regex else None
+
+
+def _temperature_from_comment(comment: str) -> Optional[str]:
+    if _TEMPERATURE_COMMENT_RE is None:
+        return None
+    m = _TEMPERATURE_COMMENT_RE.search(comment)
+    return m.group(1) if m else None
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # SPEC file detection
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -149,11 +182,9 @@ def parse_spec_data(spec_text: str):
         elif line.startswith("#C") and current_scan is not None:
             comment = line[3:].strip()
             current_scan_info["comments"].append(comment)
-            temp_match = re.search(
-                r"[Tt]emperature\s+[Ss]etpoint\s+[Aa]t\s+(\d+\.?\d*)", comment
-            )
-            if temp_match:
-                current_scan_info["temperature"] = temp_match.group(1)
+            temperature = _temperature_from_comment(comment)
+            if temperature:
+                current_scan_info["temperature"] = temperature
 
         elif line.startswith("#T") and current_scan is not None:
             parts = line.split()
@@ -692,11 +723,9 @@ def _parse_spec_for_timeline(file_path: str, filename: str) -> List[dict]:
                             current["count_time"] = parts[1] + (" " + unit if unit else "")
                     elif line.startswith("#C "):
                         comment = line[3:].strip()
-                        m = re.search(
-                            r"[Tt]emperature\s+[Ss]etpoint\s+[Aa]t\s+(\d+\.?\d*)", comment
-                        )
-                        if m:
-                            current["temperature"] = m.group(1)
+                        temperature = _temperature_from_comment(comment)
+                        if temperature:
+                            current["temperature"] = temperature
                         current["comments"] = (
                             f"{current['comments']}; {comment}" if current["comments"] else comment
                         )
@@ -766,18 +795,15 @@ def _walk_find(start: str, target: str, max_depth: int = 4) -> Optional[str]:
 
 def find_scan_data(scan_number: int, spec_file: str, spec_parent: str) -> dict:
     """
-    Locate the raw-data folder for a given scan number, mirroring the
-    original dashboard's layout heuristics (raw6M/, tiffs/, rawpil/, data/).
+    Locate the raw-data folder for a given scan number, searching the
+    configured RAW_DATA_SUBDIRS and EXTRA_SCAN_SEARCH_DIRS.
     """
     spec_base = os.path.splitext(spec_file)[0]
     spec_parent = os.path.normpath(spec_parent)
-    folder_name = f"{spec_base}_{scan_number:03d}" if spec_base else f"scan_{scan_number:03d}"
+    folder_name = SCAN_FOLDER_NAME.format(spec=spec_base or "scan", scan=scan_number)
 
-    common_subdirs = [
-        "raw6M", "tiffs", "rawpil", "data", "raw", "images",
-        os.path.join("raw6M", spec_base),
-        os.path.join("raw6M", spec_base, "standard"),
-        os.path.join("tiffs", spec_base),
+    common_subdirs = RAW_DATA_SUBDIRS + [
+        os.path.normpath(d.format(spec=spec_base)) for d in EXTRA_SCAN_SEARCH_DIRS
     ]
     for sub in common_subdirs:
         candidate = os.path.join(spec_parent, sub, folder_name)
@@ -848,10 +874,9 @@ def spec_subfolders(folder_path: str, spec_file: str) -> dict:
     result = {"spec_file": spec_base, "subfolders": [], "data_root": None}
 
     search_roots = [folder, os.path.dirname(folder)]
-    common_subdirs = ["raw6M", "tiffs", "rawpil", "data", "raw", "images"]
 
     for root in search_roots:
-        for sub in common_subdirs:
+        for sub in RAW_DATA_SUBDIRS:
             data_dir = os.path.join(root, sub, spec_base)
             if os.path.isdir(data_dir):
                 result["data_root"] = data_dir

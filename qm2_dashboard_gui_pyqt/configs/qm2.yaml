@@ -1,0 +1,214 @@
+# Beamline config for the SPEC dashboard: QM2 (CHESS ID4B).
+#
+# Everything that differs between beamlines lives here. Run with
+#   python spec_dashboard_qt.py --config configs/qm2.yaml
+#
+# These are the values the dashboard used before the settings were moved out
+# of the code, so this file reproduces the original QM2 behavior.
+
+beamline:
+  name: QM2
+  station: ID4B            # used in Slack alert text
+
+app:
+  title: QM2 Dashboard     # window title, taskbar name, About dialog
+  home_title: Quantum Materials (QM2) Beamline Dashboard
+  home_subtitle: >-
+    A native desktop viewer for SPEC scan files from the QM2 beamline
+    (CHESS ID4B), but it works with any standard SPEC-format file.
+    This is a read-only tool — it never modifies your experiment data.
+  about_text: >-
+    Native PyQt5 GUI for browsing SPEC scan files from the QM2 beamline
+    (CHESS ID4B). Read-only — never modifies source data.
+  default_root: "~"        # folder shown in the file browser at startup
+  # Remembered email/Slack settings are saved to
+  # ~/.<settings_prefix>_email_settings.json and
+  # ~/.<settings_prefix>_slack_settings.json
+  settings_prefix: qm2_dashboard
+
+# Tabs, in display order. Keys are fixed; label and description are free
+# text (the description is shown on the Home tab). `show: false` hides a
+# tab. Tabs not listed here are added at the end.
+tabs:
+  - key: home
+    label: Home
+  - key: summary
+    label: Overall Summary
+    description: >-
+      At-a-glance Beam Condition (CESR/IC1 (Ion Chamber 1)/IC2 (Ion Chamber
+      2)/Diode) and Temperature Information (Stage 1 (A)/Sample Temp/Stage 2
+      (C)/Flow Rate) readouts, refreshed live, with a dark-red No Beam banner
+      when CESR reads near zero — plus a mini plot that always follows the
+      latest scan.
+  - key: plot
+    label: SPEC Plot
+    description: >-
+      Pick X/Y columns, overlay multiple scans, switch
+      line/scatter/line+scatter/bar, normalize, or use log scale. Sensible
+      defaults are picked automatically when you load a file. Optionally
+      overlay a Gaussian or Lorentzian peak fit (via SciPy), a scan from a
+      separately-loaded reference file, or — during Auto-Refresh — the
+      previous plot as a ghost overlay for quick before/after comparison.
+      Save or copy the chart itself as a PNG image.
+  - key: live_image
+    label: Live Image (Pilatus)
+    description: >-
+      Watch a folder of .cbf detector frames and see the newest one update
+      in real time, with colormap choices and an optional ROI monitor.
+  - key: timeline
+    label: Folder Timeline
+    description: >-
+      Every scan across every SPEC file in a folder, sorted chronologically,
+      with a data-folder lookup and a downloadable PDF experiment summary.
+  - key: scan_info
+    label: Scan Info
+    description: >-
+      Every scan's command, timestamp, temperature, count time, comments,
+      and point count.
+  - key: motor_positions
+    label: Motor Positions
+    description: Per-scan motor positions read from the SPEC header.
+  - key: export
+    label: Export
+    description: >-
+      Export all data, just the plotted data, or a chosen set of
+      scans/columns to CSV.
+  - key: slack_alerts
+    label: Slack Alerts
+    description: >-
+      Configure a Slack Bot Token and channel, then get a Slack message
+      automatically whenever beam is lost or restored — including the live
+      CESR mA reading and the current status text from
+      new-status.chess.cornell.edu/ID4B when it can be fetched. Runs
+      continuously in the background regardless of which tab is open.
+
+# Live readouts on the Overall Summary tab. Each channel's value comes from
+# the loaded SPEC file's last row (column matched by `spec_patterns`) and,
+# when the "Try live network fetch" box is checked and `pv` is set, from
+# <base_url>/plot/UPDATE_<pv>, which then overrides the SPEC value.
+signals:
+  base_url: http://signals.chess.cornell.edu
+  # Page whose status text ("Refilling", "Beam Lost", ...) is appended to
+  # Slack alerts. null = don't fetch it.
+  status_page_url: http://new-status.chess.cornell.edu/ID4B
+  network_fetch_default: true   # initial state of the network-fetch checkbox
+
+  # Which channel decides "No Beam" (banner + Slack alerts), and how close
+  # to 0 counts as no beam. A placeholder threshold, not a CHESS spec.
+  # channel: null disables the banner and alerts.
+  no_beam:
+    channel: cesr
+    threshold: 0.5
+    units: mA
+
+  # canonical name -> settings
+  #   label:          text on the card
+  #   spec_patterns:  SPEC column names to match, case-insensitive; an exact
+  #                   match wins, then a substring match that isn't next to
+  #                   another digit (so "ic1" never matches "ic10")
+  #   pv:             signals.chess.cornell.edu PV name, or null for SPEC only
+  #   multiplier:     applied to the raw network value
+  #   range:          [lo, hi] valid RAW network value, or null for no check
+  channels:
+    # CESR's PV was given directly by a user, not taken from a working
+    # script, and hasn't been checked; the 1x multiplier and range are
+    # placeholders. Compare with new-status.chess.cornell.edu/ID4B on site.
+    cesr:
+      label: CESR
+      spec_patterns: [cesr]
+      pv: ID4B_CNT01_VLT
+      multiplier: 1
+      range: [-10, 1000]
+    # IC1/IC2/diode PVs and the x10000 multiplier come from the
+    # ALL_PV_MAPPING dict in a working ChessLiveDataExtractor script.
+    ic1:
+      label: IC1 (Ion Chamber 1)
+      spec_patterns: [ic1, ion_chamber1, ion_chamber_1, ionchamber1]
+      pv: ID4B_CNT00_VLT
+      multiplier: 10000
+      range: [-10, 100]
+    ic2:
+      label: IC2 (Ion Chamber 2)
+      spec_patterns: [ic2, ion_chamber2, ion_chamber_2, ionchamber2]
+      pv: ID4B_CNT02_VLT
+      multiplier: 10000
+      range: [-10, 100]
+    diode:
+      label: Diode
+      spec_patterns: [diode, pin_diode, pindiode, beam_stop_diode, beamstopdiode]
+      pv: ID4B_CNT03_VLT
+      multiplier: 10000
+      range: [-10, 100]
+    # Cryojet gas flow, read in SPEC by flow_get (Macros/surrena/aalborg_flow.mac).
+    # No known network PV, so it only ever comes from the SPEC "flow" column.
+    flow:
+      label: Flow Rate
+      spec_patterns: [flow, gas_flow, flow_rate, cryo_flow]
+      pv: null
+      multiplier: 1
+      range: [-10, 100]
+    # Cryostat temperatures. PVs confirmed by the user and a working script;
+    # the (50, 400) K range is a permissive placeholder.
+    stage1:
+      label: Stage 1 (A)
+      spec_patterns: [stage1, stg1, cryo_stage1, cryo_stg1, cryogl_stg1]
+      pv: ID4B_CRYOGL_STG1_T
+      multiplier: 1
+      range: [50, 400]
+    sample:
+      label: Sample Temp
+      spec_patterns: [sample_t, sample_temp, sampletemp, cryo_sample, cryogl_sam]
+      pv: ID4B_CRYOGL_SAM_T
+      multiplier: 1
+      range: [50, 400]
+    stage2:
+      label: Stage 2 (C)
+      spec_patterns: [stage2, stg2, cryo_stage2, cryo_stg2, cryogl_stg2]
+      pv: ID4B_CRYOGL_STG2_T
+      multiplier: 1
+      range: [50, 400]
+
+# Rows of readout cards on the Overall Summary tab, top to bottom. Each lists
+# channels from signals.channels. A group with no channels still shows its
+# title.
+summary:
+  groups:
+    - title: Beam Condition
+      channels: [cesr, ic1, ic2, diode]
+    - title: Temperature Information
+      channels: [stage1, sample, stage2, flow]
+
+plot:
+  # Y column picked by default: the first of these the file has.
+  default_y_priority: [ic1, diode, I0, I1]
+  # X column when the scan command's motor isn't a column.
+  x_fallback_columns: [Time, Epoch, time, epoch]
+
+timeline:
+  # SPEC files whose name contains any of these (case-insensitive) count as
+  # calibration/reference files, not samples, in the experiment summary.
+  calibration_names: [ceo2, air, background, bg, empty, dark]
+
+data_layout:
+  # Raw-data subfolders next to the SPEC file, tried in order: the Live Image
+  # tab watches the first one found, and they are searched for a scan's
+  # data folder and for sub-sample folders.
+  raw_data_subdirs: [raw6M, tiffs, rawpil, data, raw, images]
+  # Further places to look for a scan's data folder. {spec} = SPEC file
+  # name without extension.
+  extra_scan_search_dirs: ["raw6M/{spec}", "raw6M/{spec}/standard", "tiffs/{spec}"]
+  # A scan's data folder name. {spec} as above, {scan} = scan number.
+  scan_folder_name: "{spec}_{scan:03d}"
+
+spec_parsing:
+  # Regex run on each scan's #C comment lines; group 1 is the temperature
+  # setpoint shown in Scan Info / Folder Timeline. null = don't extract.
+  temperature_comment_regex: '[Tt]emperature\s+[Ss]etpoint\s+[Aa]t\s+(\d+\.?\d*)'
+
+live_image:
+  # Detector frame files to watch (read with fabio). Frame numbers are taken
+  # from the digits just before this extension.
+  frame_extension: .cbf
+
+slack:
+  default_channel: "#beamline-status"

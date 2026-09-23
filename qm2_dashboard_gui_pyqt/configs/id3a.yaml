@@ -1,0 +1,139 @@
+# Beamline config for the SPEC dashboard: CHESS ID3A.
+#
+# This is the default config (used when --config isn't given). It starts as
+# a copy of configs/qm2.yaml with the ID4B-only values cleared, and every tab
+# and readout card kept so you can see what's there; unknown values show as
+# "—". configs/qm2.yaml has the full comments for each setting.
+#
+# Lines marked TODO(ID3A) still hold QM2 values, or are blank, and need
+# checking for ID3A.
+
+beamline:
+  name: ID3A
+  station: ID3A
+
+app:
+  title: ID3A Dashboard
+  home_title: ID3A Beamline Dashboard          # TODO(ID3A): full beamline name
+  home_subtitle: >-
+    A native desktop viewer for SPEC scan files from CHESS ID3A, but it
+    works with any standard SPEC-format file. This is a read-only tool — it
+    never modifies your experiment data.
+  about_text: >-
+    Native PyQt5 GUI for browsing SPEC scan files from CHESS ID3A.
+    Read-only — never modifies source data.
+  default_root: "~"                            # TODO(ID3A): ID3A data root
+  settings_prefix: id3a_dashboard
+
+tabs:
+  - key: home
+    label: Home
+  - key: summary
+    label: Overall Summary
+    description: >-
+      Live readouts grouped as configured in the summary section of the
+      beamline config, a No Beam banner, and a mini plot that always follows
+      the latest scan.
+  - key: plot
+    label: SPEC Plot
+    description: >-
+      Pick X/Y columns, overlay multiple scans, switch
+      line/scatter/line+scatter/bar, normalize, or use log scale. Optionally
+      overlay a Gaussian or Lorentzian peak fit, a scan from a reference
+      file, or the previous plot during Auto-Refresh. Save or copy the chart
+      as a PNG image.
+  - key: live_image
+    label: Live Image                          # TODO(ID3A): detector name
+    description: >-
+      Watch a folder of detector frames and see the newest one update in
+      real time, with colormap choices and an optional ROI monitor.
+  - key: timeline
+    label: Folder Timeline
+    description: >-
+      Every scan across every SPEC file in a folder, sorted chronologically,
+      with a data-folder lookup and a downloadable PDF experiment summary.
+  - key: scan_info
+    label: Scan Info
+    description: >-
+      Every scan's command, timestamp, temperature, count time, comments,
+      and point count.
+  - key: motor_positions
+    label: Motor Positions
+    description: Per-scan motor positions read from the SPEC header.
+  - key: export
+    label: Export
+    description: >-
+      Export all data, just the plotted data, or a chosen set of
+      scans/columns to CSV.
+  - key: slack_alerts
+    label: Slack Alerts
+    description: >-
+      Post a Slack message automatically whenever beam is lost or restored.
+      Runs in the background regardless of which tab is open.
+
+signals:
+  base_url: http://signals.chess.cornell.edu
+  status_page_url: http://new-status.chess.cornell.edu/ID3A
+  network_fetch_default: true
+
+  no_beam:
+    channel: cesr
+    threshold: 0.5
+    units: mA
+
+  # IC0-IC4 and CNT05-07 are ID3A's counters. The other channels are still
+  # QM2's, with no PV, so they only fill from matching SPEC columns.
+  channels:
+    cesr:
+      label: CESR
+      spec_patterns: [cesr]
+      pv: null                                 # TODO(ID3A)
+      multiplier: 1
+      range: [-10, 1000]
+    # Ion chambers ic0-ic4 are counters CNT00-CNT04 (raw volts).
+    ic0: {label: IC0, spec_patterns: [ic0], pv: ID3A_CNT00_VLT, multiplier: 1, range: null}
+    ic1: {label: IC1, spec_patterns: [ic1], pv: ID3A_CNT01_VLT, multiplier: 1, range: null}
+    ic2: {label: IC2, spec_patterns: [ic2], pv: ID3A_CNT02_VLT, multiplier: 1, range: null}
+    ic3: {label: IC3, spec_patterns: [ic3], pv: ID3A_CNT03_VLT, multiplier: 1, range: null}
+    ic4: {label: IC4, spec_patterns: [ic4], pv: ID3A_CNT04_VLT, multiplier: 1, range: null}
+    diode:
+      label: Diode
+      spec_patterns: [diode, pin_diode, pindiode, beam_stop_diode, beamstopdiode]
+      pv: null                                 # TODO(ID3A)
+      multiplier: 1
+      range: null
+    # Remaining counter voltages from the chessproxy-signals plot page.
+    # TODO(ID3A): what each one measures -- rename the label, and add
+    # spec_patterns if SPEC logs it.
+    id3a_cnt05: {label: ID3A CNT05, spec_patterns: [], pv: ID3A_CNT05_VLT, multiplier: 1, range: null}
+    id3a_cnt06: {label: ID3A CNT06, spec_patterns: [], pv: ID3A_CNT06_VLT, multiplier: 1, range: null}
+    id3a_cnt07: {label: ID3A CNT07, spec_patterns: [], pv: ID3A_CNT07_VLT, multiplier: 1, range: null}
+
+summary:
+  groups:
+    - title: Beam Condition
+      channels: [cesr, ic0, ic1, ic2, ic3, ic4, diode]
+    - title: ID3A Counters (V)
+      channels: [id3a_cnt05, id3a_cnt06, id3a_cnt07]
+
+plot:
+  default_y_priority: [ic1, diode, I0, I1]     # TODO(ID3A)
+  x_fallback_columns: [Time, Epoch, time, epoch]
+
+timeline:
+  calibration_names: [ceo2, air, background, bg, empty, dark]   # TODO(ID3A)
+
+data_layout:
+  raw_data_subdirs: [raw6M, tiffs, rawpil, data, raw, images]   # TODO(ID3A)
+  extra_scan_search_dirs: ["raw6M/{spec}", "raw6M/{spec}/standard", "tiffs/{spec}"]
+  scan_folder_name: "{spec}_{scan:03d}"        # TODO(ID3A)
+
+spec_parsing:
+  # TODO(ID3A): QM2's temperature-controller comment format
+  temperature_comment_regex: '[Tt]emperature\s+[Ss]etpoint\s+[Aa]t\s+(\d+\.?\d*)'
+
+live_image:
+  frame_extension: .cbf                        # TODO(ID3A): detector file type
+
+slack:
+  default_channel: "#beamline-status"          # TODO(ID3A)
