@@ -1,0 +1,8 @@
+PyQt5
+pyqtgraph
+pandas
+numpy
+scipy
+reportlab
+Pillow
+requests   # needed for the Summary tab's "Try live network fetch" checkbox AND for Slack Alerts' status-message fetch (new-status.chess.cornell.edu/ID4B)
