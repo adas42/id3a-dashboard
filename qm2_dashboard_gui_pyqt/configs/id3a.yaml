@@ -20,7 +20,7 @@ app:
     works with any standard SPEC-format file. This is a read-only tool — it
     never modifies your experiment data.
   about_text: >-
-    Native PyQt5 GUI for browsing SPEC scan files from CHESS ID3A.
+    Native Qt (PySide6) GUI for browsing SPEC scan files from CHESS ID3A.
     Read-only — never modifies source data.
   default_root: "~"                            # TODO(ID3A): ID3A data root
   settings_prefix: id3a_dashboard

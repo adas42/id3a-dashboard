@@ -18,7 +18,7 @@ app:
     (CHESS ID4B), but it works with any standard SPEC-format file.
     This is a read-only tool — it never modifies your experiment data.
   about_text: >-
-    Native PyQt5 GUI for browsing SPEC scan files from the QM2 beamline
+    Native Qt (PySide6) GUI for browsing SPEC scan files from the QM2 beamline
     (CHESS ID4B). Read-only — never modifies source data.
   default_root: "~"        # folder shown in the file browser at startup
   # Remembered email/Slack settings are saved to

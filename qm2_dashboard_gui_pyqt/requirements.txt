@@ -1,4 +1,4 @@
-PyQt5
+PySide6    # Qt 6, same binding as hexrd/hexrdgui
 PyYAML     # beamline config files in configs/
 pyqtgraph
 pandas

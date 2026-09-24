@@ -1,10 +1,10 @@
 """
-SPEC Dashboard — PyQt5 native GUI.
+SPEC Dashboard — PySide6 (Qt 6) native GUI.
 
-A native desktop application (PyQt5 + pyqtgraph) for browsing and analyzing
-SPEC data files from synchrotron beamline experiments. Built to match the
-toolkit already in use for the pilatus_live_viewer app (PyQt5 + pyqtgraph),
-so both native GUIs share one dependency stack.
+A native desktop application (PySide6 + pyqtgraph) for browsing and
+analyzing SPEC data files from synchrotron beamline experiments. Uses the
+same Qt binding as hexrd/hexrdgui, so hexrd's instrument-based detector
+rendering can run in the same process.
 
 All parsing/analysis logic lives in spec_core.py (toolkit-agnostic, reused
 unchanged from the Tkinter build). This file only handles presentation.
@@ -40,10 +40,11 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+# Imported before pyqtgraph so pyqtgraph binds to PySide6 too.
+from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 import pyqtgraph.exporters
 from PIL import Image as PILImage
-from PyQt5 import QtCore, QtGui, QtWidgets
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
@@ -998,8 +999,8 @@ class LiveImageLoader(QtCore.QThread):
     Loader, kept as its own QThread subclass so image decoding never blocks
     the main UI thread."""
 
-    newImage = QtCore.pyqtSignal(object, str, float, object)  # data, path, mtime, active
-    status = QtCore.pyqtSignal(str)
+    newImage = QtCore.Signal(object, str, float, object)  # data, path, mtime, active
+    status = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -1857,59 +1858,59 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
         file_menu = menubar.addMenu("&File")
 
-        act_root = QtWidgets.QAction("Set Root Folder…", self)
+        act_root = QtGui.QAction("Set Root Folder…", self)
         act_root.setShortcut("Ctrl+O")
         act_root.triggered.connect(self.set_root_folder)
         file_menu.addAction(act_root)
 
-        act_load = QtWidgets.QAction("Load SPEC File…", self)
+        act_load = QtGui.QAction("Load SPEC File…", self)
         act_load.triggered.connect(self.load_file_dialog)
         file_menu.addAction(act_load)
 
-        act_sample = QtWidgets.QAction("Load Sample Data", self)
+        act_sample = QtGui.QAction("Load Sample Data", self)
         act_sample.triggered.connect(self.load_sample_data)
         file_menu.addAction(act_sample)
 
-        act_reload = QtWidgets.QAction("Reload Current File", self)
+        act_reload = QtGui.QAction("Reload Current File", self)
         act_reload.triggered.connect(self.reload_file)
         file_menu.addAction(act_reload)
 
         file_menu.addSeparator()
-        act_exit = QtWidgets.QAction("Exit", self)
+        act_exit = QtGui.QAction("Exit", self)
         act_exit.triggered.connect(self.close)
         file_menu.addAction(act_exit)
 
         view_menu = menubar.addMenu("&View")
         theme_menu = view_menu.addMenu("Theme")
-        theme_group = QtWidgets.QActionGroup(self)
+        theme_group = QtGui.QActionGroup(self)
         theme_group.setExclusive(True)
 
-        self.act_theme_dark = QtWidgets.QAction("Dark", self, checkable=True)
+        self.act_theme_dark = QtGui.QAction("Dark", self, checkable=True)
         self.act_theme_dark.setChecked(True)
         self.act_theme_dark.triggered.connect(lambda: self.set_theme("dark"))
         theme_group.addAction(self.act_theme_dark)
         theme_menu.addAction(self.act_theme_dark)
 
-        self.act_theme_light = QtWidgets.QAction("Light", self, checkable=True)
+        self.act_theme_light = QtGui.QAction("Light", self, checkable=True)
         self.act_theme_light.triggered.connect(lambda: self.set_theme("light"))
         theme_group.addAction(self.act_theme_light)
         theme_menu.addAction(self.act_theme_light)
 
         help_menu = menubar.addMenu("&Help")
-        act_shortcuts = QtWidgets.QAction("Keyboard Shortcuts", self)
+        act_shortcuts = QtGui.QAction("Keyboard Shortcuts", self)
         act_shortcuts.triggered.connect(self._show_shortcuts)
         help_menu.addAction(act_shortcuts)
 
-        act_about = QtWidgets.QAction("About", self)
+        act_about = QtGui.QAction("About", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
 
         # Global shortcuts to jump to tabs
-        sc_plot = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+P"), self)
+        sc_plot = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+P"), self)
         sc_plot.activated.connect(lambda: self._goto_tab("plot"))
-        sc_scaninfo = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+T"), self)
+        sc_scaninfo = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+T"), self)
         sc_scaninfo.activated.connect(lambda: self._goto_tab("scan_info"))
-        sc_export = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+E"), self)
+        sc_export = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+E"), self)
         sc_export.activated.connect(lambda: self._goto_tab("export"))
 
     def _show_shortcuts(self):
@@ -4846,7 +4847,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         dlg = EmailSendDialog(
             self, csv_bytes=csv_bytes, png_bytes=png_bytes, default_subject=default_subject
         )
-        dlg.exec_()
+        dlg.exec()
 
     def export_selected(self):
         if self.df is None:
@@ -4907,7 +4908,7 @@ def main():
     app.setStyleSheet(_build_qss())
     window = SpecDashboardApp()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
