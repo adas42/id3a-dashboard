@@ -81,16 +81,16 @@ signals:
     threshold: 0.5
     units: mA
 
-  # IC0-IC4 and CNT05-07 are ID3A's counters. The other channels are still
-  # QM2's, with no PV, so they only fill from matching SPEC columns.
+  # Ion chambers IC0-IC4 and the diode are ID3A counters CNT00-CNT05 (raw
+  # volts). CESR is the storage-ring current.
   channels:
     cesr:
       label: CESR
       spec_patterns: [cesr]
-      pv: null                                 # TODO(ID3A)
-      multiplier: 1
-      range: [-10, 1000]
-    # Ion chambers ic0-ic4 are counters CNT00-CNT04 (raw volts).
+      pv: CESR_BR_POSI_A
+      multiplier: 1                            # read 141.86 live (mA), 2026-09-24
+      range: [-10, 1000]                       # QM2's permissive placeholder
+    # Ion chambers ic0-ic4 are counters CNT00-CNT04.
     ic0: {label: IC0, spec_patterns: [ic0], pv: ID3A_CNT00_VLT, multiplier: 1, range: null}
     ic1: {label: IC1, spec_patterns: [ic1], pv: ID3A_CNT01_VLT, multiplier: 1, range: null}
     ic2: {label: IC2, spec_patterns: [ic2], pv: ID3A_CNT02_VLT, multiplier: 1, range: null}
@@ -98,23 +98,19 @@ signals:
     ic4: {label: IC4, spec_patterns: [ic4], pv: ID3A_CNT04_VLT, multiplier: 1, range: null}
     diode:
       label: Diode
-      spec_patterns: [diode, pin_diode, pindiode, beam_stop_diode, beamstopdiode]
-      pv: null                                 # TODO(ID3A)
+      spec_patterns: [diode, pin_diode, pindiode, beam_stop_diode, beamstopdiode]   # TODO(ID3A): QM2's column names
+      pv: ID3A_CNT05_VLT
       multiplier: 1
       range: null
-    # Remaining counter voltages from the chessproxy-signals plot page.
-    # TODO(ID3A): what each one measures -- rename the label, and add
-    # spec_patterns if SPEC logs it.
-    id3a_cnt05: {label: ID3A CNT05, spec_patterns: [], pv: ID3A_CNT05_VLT, multiplier: 1, range: null}
-    id3a_cnt06: {label: ID3A CNT06, spec_patterns: [], pv: ID3A_CNT06_VLT, multiplier: 1, range: null}
-    id3a_cnt07: {label: ID3A CNT07, spec_patterns: [], pv: ID3A_CNT07_VLT, multiplier: 1, range: null}
+    # Monochromator stabilizer, counter CNT06.
+    mostab: {label: MOSTAB, spec_patterns: [mostab], pv: ID3A_CNT06_VLT, multiplier: 1, range: null}
 
 summary:
   groups:
     - title: Beam Condition
       channels: [cesr, ic0, ic1, ic2, ic3, ic4, diode]
     - title: ID3A Counters (V)
-      channels: [id3a_cnt05, id3a_cnt06, id3a_cnt07]
+      channels: [mostab]
 
 plot:
   default_y_priority: [ic1, diode, I0, I1]     # TODO(ID3A)
