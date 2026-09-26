@@ -206,8 +206,16 @@ spec_parsing:
   temperature_comment_regex: '[Tt]emperature\s+[Ss]etpoint\s+[Aa]t\s+(\d+\.?\d*)'
 
 live_image:
-  # Detector frame files to watch (read with fabio). Frame numbers are taken
-  # from the digits just before this extension.
+  # The tab shows hexrdgui's Cartesian view of the whole instrument, read
+  # through hexrd (see configs/id3a.yaml for a working setup):
+  #   instrument:  hexrd instrument file (.yml/.hexrd); null disables the tab
+  #   panels:      {panel: flip}, panel = frame file prefix; flip lr, ud or null
+  #   hdf5_path:   [group, dataset] for plain HDF5 frame files
+  # No Pilatus instrument file yet, so the tab is off. Note that hexrd reads
+  # .cbf frames through its image-files reader, which uses fabio.
+  instrument: null
+  # Frame files are <panel>_<image_n><frame_extension>; the frame number is
+  # the digits just before the extension.
   frame_extension: .cbf
 
 slack:

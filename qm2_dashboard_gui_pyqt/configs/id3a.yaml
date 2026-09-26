@@ -129,7 +129,18 @@ spec_parsing:
   temperature_comment_regex: '[Tt]emperature\s+[Ss]etpoint\s+[Aa]t\s+(\d+\.?\d*)'
 
 live_image:
-  frame_extension: .cbf                        # TODO(ID3A): detector file type
+  # The tab shows hexrdgui's Cartesian view of the whole instrument.
+  # hexrd instrument file (.yml/.hexrd). Changes with each calibration.
+  instrument: /nfs/chess/aux/cycles/2026-3/id3a/hedstrom-5112-a/dex_1.yml
+  # Frame files are <panel>_<image_n><frame_extension>, one per panel, e.g.
+  # <scan>/ff/ff1_000035.h5.
+  frame_extension: .h5
+  hdf5_path: [imageseries, images]             # group, dataset of the images
+  # Panel (also the frame file prefix) -> flip before rendering: lr, ud
+  # (numpy fliplr/flipud) or null. Same as dex_powder_int_config.yaml.
+  panels:
+    ff1: lr
+    ff2: ud
 
 slack:
   default_channel: "#beamline-status"          # TODO(ID3A)

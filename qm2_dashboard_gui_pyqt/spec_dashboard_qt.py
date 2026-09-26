@@ -62,15 +62,14 @@ import beamline_config as bcfg
 import spec_core as sc
 import chess_signals as csig
 
-# fabio is only needed for the "Live Image (Pilatus)" tab, which reads
-# .cbf detector frames — the same optional dependency pilatus_live_viewer.py
-# uses. Importing it lazily/optionally here means the rest of the dashboard
-# (SPEC-file browsing, plotting, etc.) keeps working even on a machine where
-# fabio isn't installed; that tab just shows an explanatory message instead.
-try:
-    import fabio
-except ImportError:
-    fabio = None
+# hexrdgui is only needed for the Live Image tab, which renders detector
+# frames with hexrdgui's Cartesian view (hexrd_display.py). It takes seconds
+# to import (over a minute from a cold NFS cache), so this only checks that
+# it's installed; the Live Image loader thread imports it in the background.
+# Without it the rest of the dashboard works and that tab shows a message.
+import importlib.util
+HEXRD_AVAILABLE = importlib.util.find_spec("hexrdgui") is not None
+import hexrd_display as hexd
 
 # ── "Send by Email" feature ──────────────────────────────────────────────
 # Provider presets so a user who doesn't know their own SMTP host/port can
@@ -415,6 +414,7 @@ def _apply_config(cfg: Dict):
     global EMAIL_SETTINGS_PATH, SLACK_SETTINGS_PATH, SLACK_DEFAULT_CHANNEL
     global _DEFAULT_Y_PRIORITY, _X_FALLBACK_COLUMNS, _CALIBRATION_FILES
     global LIVE_FRAME_EXT, _LIVE_FRAME_NO_RE
+    global LIVE_INSTRUMENT, LIVE_PANELS, LIVE_HDF5_PATH
     CONFIG = cfg
     app = cfg["app"]
     APP_TITLE = app.get("title") or "SPEC Dashboard"
@@ -430,8 +430,13 @@ def _apply_config(cfg: Dict):
     _X_FALLBACK_COLUMNS = list(cfg["plot"].get("x_fallback_columns") or [])
     _CALIBRATION_FILES = [n.lower() for n in cfg["timeline"].get("calibration_names") or []]
 
-    LIVE_FRAME_EXT = cfg["live_image"].get("frame_extension") or ".cbf"
+    live = cfg["live_image"]
+    LIVE_FRAME_EXT = live.get("frame_extension") or ".cbf"
     _LIVE_FRAME_NO_RE = re.compile(r"(\d+)" + re.escape(LIVE_FRAME_EXT) + "$")
+    instrument = live.get("instrument")
+    LIVE_INSTRUMENT = os.path.expanduser(instrument) if instrument else None
+    LIVE_PANELS = dict(live.get("panels") or {})
+    LIVE_HDF5_PATH = list(live["hdf5_path"]) if live.get("hdf5_path") else None
 
     sc.configure(cfg["data_layout"], cfg["spec_parsing"])
     csig.configure(cfg["signals"])
@@ -839,9 +844,14 @@ def _style_summary_chart(panel: "PlotPanel", title: str, y_label: str = ""):
 # (rather than a QMainWindow) so it can be embedded as one tab here, with
 # its own status line standing in for the standalone app's statusBar().
 #
-# SAFETY — READ ONLY: exactly like the standalone app, this only ever reads
-# .cbf files (each opened read-only via fabio and closed immediately). It
-# never writes, renames, moves, or deletes anything in the watched folder.
+# Frames are now read through hexrd and shown as hexrdgui's Cartesian view
+# of the whole instrument (see hexrd_display.py), not one raw frame via
+# fabio. Each panel's newest frame file, <panel>_<image_n><ext>, is
+# rendered together.
+#
+# SAFETY — READ ONLY: this only ever reads detector files (opened read-only
+# by hexrd). It never writes, renames, moves, or deletes anything in the
+# watched folder.
 # ═══════════════════════════════════════════════════════════════════════
 LIVE_COLORMAPS = ["viridis", "inferno", "magma", "plasma",
                    "cividis", "turbo", "gray", "jet"]
@@ -851,6 +861,12 @@ LIVE_COLORMAPS = ["viridis", "inferno", "magma", "plasma",
 # live_image.frame_extension (set by _apply_config()).
 LIVE_FRAME_EXT = ".cbf"
 _LIVE_FRAME_NO_RE = re.compile(r"(\d+)\.cbf$")
+# From the rest of the config's live_image section: the hexrd instrument
+# file, {panel name (= frame file prefix): flip or None}, and the
+# (group, dataset) of the images in plain HDF5 frame files.
+LIVE_INSTRUMENT: Optional[str] = None
+LIVE_PANELS: Dict[str, Optional[str]] = {}
+LIVE_HDF5_PATH: Optional[List[str]] = None
 
 
 class _LiveFlowLayout(QtWidgets.QLayout):
@@ -920,26 +936,24 @@ class _LiveFlowLayout(QtWidgets.QLayout):
         return y + line_height - rect.y()
 
 
-def _live_find_newest_cbf_fast(folder):
-    """Newest .cbf in one folder, by FILENAME (Pilatus frames are
-    zero-padded, so the highest name is the newest). Read-only."""
-    best = None
+def _live_find_newest_frames(folder):
+    """Newest frame file of each configured panel in one folder, by FILENAME
+    (frame numbers are zero-padded, so the highest name is the newest).
+    Frame files are named <panel>_<image_n><LIVE_FRAME_EXT>. Returns
+    {panel: path} for the panels found. Read-only."""
+    best = {}
     try:
         with os.scandir(folder) as it:
             for e in it:
                 n = e.name
-                if n.endswith(LIVE_FRAME_EXT) and (best is None or n > best):
-                    best = n
+                if not n.endswith(LIVE_FRAME_EXT):
+                    continue
+                panel = n.rsplit("_", 1)[0]
+                if panel in LIVE_PANELS and (panel not in best or n > best[panel]):
+                    best[panel] = n
     except OSError:
-        return None, -1.0
-    if best is None:
-        return None, -1.0
-    p = os.path.join(folder, best)
-    try:
-        m = os.path.getmtime(p)
-    except OSError:
-        m = -1.0
-    return p, m
+        return {}
+    return {panel: os.path.join(folder, n) for panel, n in best.items()}
 
 
 def _live_find_active_scan_dir(folder):
@@ -984,7 +998,11 @@ def _live_maxpool(a, f):
     if h2 == 0 or w2 == 0:
         return a
     a = a[:h2, :w2]
-    return a.reshape(h2 // f, f, w2 // f, f).max(axis=(1, 3))
+    # NaN (no panel there) shouldn't swallow a block's real pixels.
+    a = np.where(np.isnan(a), -np.inf, a)
+    pooled = a.reshape(h2 // f, f, w2 // f, f).max(axis=(1, 3))
+    pooled[np.isneginf(pooled)] = np.nan
+    return pooled
 
 
 def _live_frame_number_from_path(path):
@@ -994,12 +1012,14 @@ def _live_frame_number_from_path(path):
 
 
 class LiveImageLoader(QtCore.QThread):
-    """Background polling thread that finds and loads the newest .cbf frame
-    in a watched folder — identical algorithm to pilatus_live_viewer.py's
-    Loader, kept as its own QThread subclass so image decoding never blocks
-    the main UI thread."""
+    """Background polling thread that finds the newest frame of every
+    detector panel in a watched folder and renders them with hexrdgui's
+    Cartesian view (hexrd_display.py). Importing hexrdgui, reading the files
+    and the warp all happen here, so they never block the main UI thread.
+    Folder discovery is the same algorithm as pilatus_live_viewer.py's
+    Loader."""
 
-    newImage = QtCore.Signal(object, str, float, object)  # data, path, mtime, active
+    newImage = QtCore.Signal(object, object, str, float, object)  # image, extent, path, mtime, active
     status = QtCore.Signal(str)
 
     def __init__(self):
@@ -1013,15 +1033,14 @@ class LiveImageLoader(QtCore.QThread):
         self._active_dir = None
         self._active_last_path = None
         self._active_last_change = 0.0
-        self._loaded_path = None
-        self._loaded_mtime = -1.0
+        self._loaded_key = None
+        self._panels: List[str] = []
 
     def configure(self, **kw):
         if "folder" in kw and kw["folder"] is not None:
             self.folder = kw["folder"]
             self._active_dir = None
-            self._loaded_path = None
-            self._loaded_mtime = -1.0
+            self._loaded_key = None
         if "recurse" in kw and kw["recurse"] is not None:
             self.recurse = bool(kw["recurse"])
             self._active_dir = None
@@ -1035,25 +1054,45 @@ class LiveImageLoader(QtCore.QThread):
     def stop(self):
         self._running = False
 
-    def _locate_recursive(self, folder):
+    def _load_instrument(self):
+        """Import hexrdgui and load the configured instrument, once. Done in
+        this thread because the import can take over a minute from a cold
+        NFS cache."""
+        if self._panels:
+            return True
+        self.status.emit("Loading hexrdgui and instrument %s ..." % LIVE_INSTRUMENT)
+        try:
+            panels = hexd.load_instrument(LIVE_INSTRUMENT)
+        except Exception as exc:                        # noqa: BLE001
+            self.status.emit("Could not load instrument %s: %s" % (LIVE_INSTRUMENT, exc))
+            return False
+        missing = [p for p in panels if p not in LIVE_PANELS]
+        if missing:
+            self.status.emit("Instrument panel(s) %s not listed under "
+                             "live_image.panels in the config" % ", ".join(missing))
+            return False
+        self._panels = panels
+        self.status.emit("Instrument loaded (panels %s)." % ", ".join(panels))
+        return True
+
+    def _locate_active(self, folder):
+        """The scan folder under `folder` currently being written. The tree is
+        only walked again once the cached folder has had no new frame for
+        discover_interval seconds."""
         now = time.time()
         ad = self._active_dir
         if ad and os.path.isdir(ad):
-            path, mtime = _live_find_newest_cbf_fast(ad)
-            if path is not None:
-                if path != self._active_last_path:
-                    self._active_last_path = path
+            newest = max(_live_find_newest_frames(ad).values(), default=None)
+            if newest is not None:
+                if newest != self._active_last_path:
+                    self._active_last_path = newest
                     self._active_last_change = now
                 if (now - self._active_last_change) < self.discover_interval:
-                    return path, mtime
-        active = _live_find_active_scan_dir(folder)
-        self._active_dir = active
-        if active:
-            path, mtime = _live_find_newest_cbf_fast(active)
-            self._active_last_path = path
-            self._active_last_change = now
-            return path, mtime
-        return None, -1.0
+                    return ad
+        self._active_dir = _live_find_active_scan_dir(folder)
+        self._active_last_path = None
+        self._active_last_change = now
+        return self._active_dir
 
     def run(self):
         while self._running:
@@ -1062,43 +1101,56 @@ class LiveImageLoader(QtCore.QThread):
                 time.sleep(interval)
                 continue
 
+            if not self._load_instrument():
+                time.sleep(5.0)
+                continue
+
             folder = self.folder
             if not os.path.isdir(folder):
                 self.status.emit("Folder not found: %s" % folder)
                 time.sleep(max(0.5, interval))
                 continue
 
-            if self.recurse:
-                path, mtime = self._locate_recursive(folder)
+            if self.recurse or not _live_find_newest_frames(folder):
+                active = self._locate_active(folder)
             else:
-                path, mtime = _live_find_newest_cbf_fast(folder)
-                if path is None:
-                    path, mtime = self._locate_recursive(folder)
-
-            if path is None:
-                self.status.emit("Searching for %s files under %s ..." % (LIVE_FRAME_EXT, folder))
+                active = folder
+            found = _live_find_newest_frames(active) if active else {}
+            missing = [p for p in self._panels if p not in found]
+            if missing:
+                self.status.emit("Searching for %s frames (%s_*%s) under %s ..."
+                                 % (", ".join(missing), missing[0], LIVE_FRAME_EXT, folder))
                 time.sleep(max(0.3, interval))
                 continue
-
-            if path == self._loaded_path and mtime == self._loaded_mtime:
-                time.sleep(interval)
-                continue
-
-            if not _live_size_stable(path):
-                time.sleep(interval)
-                continue
+            frames = {p: found[p] for p in self._panels}
 
             try:
-                data = np.asarray(fabio.open(path).data)   # read-only open
-            except Exception as exc:                        # noqa: BLE001
-                self.status.emit("Load skipped (%s): %s"
-                                 % (os.path.basename(path), exc))
+                mtime = max(os.path.getmtime(p) for p in frames.values())
+            except OSError:
+                time.sleep(interval)
+                continue
+            key = (tuple(sorted(frames.items())), mtime)
+            if key == self._loaded_key:
                 time.sleep(interval)
                 continue
 
-            self._loaded_path = path
-            self._loaded_mtime = mtime
-            self.newImage.emit(data, path, mtime, self._active_dir)
+            if not all(_live_size_stable(p) for p in frames.values()):
+                time.sleep(interval)
+                continue
+
+            # Don't retry the same files every tick if they fail to render.
+            self._loaded_key = key
+            try:
+                hexd.load_detector_files(frames, hdf5_path=LIVE_HDF5_PATH, flips=LIVE_PANELS)
+                img, extent = hexd.render_cartesian()
+            except Exception as exc:                        # noqa: BLE001
+                self.status.emit("Render skipped (%s): %s"
+                                 % (os.path.basename(active.rstrip("/")), exc))
+                time.sleep(interval)
+                continue
+
+            path = max(frames.values())
+            self.newImage.emit(np.ma.filled(img, np.nan), extent, path, mtime, active)
             time.sleep(interval)
 
 
@@ -1132,15 +1184,17 @@ class LiveImageTab(QtWidgets.QWidget):
         # views are always in sync.
         self._mirror_views: List[pg.ImageView] = []
 
+        # (left, right, bottom, top) in mm of the current Cartesian image.
+        self._extent = None
+
+        # The tab needs hexrdgui and a configured instrument; otherwise
+        # _build_ui() shows a message instead of the viewer, and no loader
+        # thread is started (apply_theme() and stop() check self.loader).
+        self._enabled = HEXRD_AVAILABLE and bool(LIVE_INSTRUMENT)
         self._build_ui()
 
-        # Only spin up the background polling thread when fabio is actually
-        # available -- otherwise _build_ui() returns early (no folder/watch
-        # controls at all) and there's nothing for the loader to do; skipping
-        # it here matches the same "if fabio is None: bail out" guard already
-        # used by apply_theme() and stop() below.
         self.loader = None
-        if fabio is not None:
+        if self._enabled:
             self.loader = LiveImageLoader()
             self.loader.newImage.connect(self.on_new_image)
             self.loader.status.connect(self._set_status)
@@ -1151,13 +1205,23 @@ class LiveImageTab(QtWidgets.QWidget):
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(4)
 
-        if fabio is None:
-            warn = QtWidgets.QLabel(
-                "The 'fabio' package isn't installed, so this tab can't "
-                f"read {LIVE_FRAME_EXT} detector frames. Install it with:\n\n"
-                "    pip install fabio\n\n"
-                "then restart the dashboard to use the Live Image tab."
-            )
+        if not self._enabled:
+            if not HEXRD_AVAILABLE:
+                text = (
+                    "hexrdgui isn't installed, so this tab can't render "
+                    "detector frames. Install it with:\n\n"
+                    "    conda install -c HEXRD/label/prerelease -c conda-forge hexrdgui\n\n"
+                    "then restart the dashboard to use the Live Image tab."
+                )
+            else:
+                text = (
+                    "No detector instrument is configured. Set "
+                    "live_image.instrument (a hexrd instrument .yml) and "
+                    "live_image.panels in\n\n"
+                    f"    {CONFIG.get('_path', 'the beamline config')}\n\n"
+                    "then restart the dashboard to use the Live Image tab."
+                )
+            warn = QtWidgets.QLabel(text)
             warn.setWordWrap(True)
             warn.setAlignment(QtCore.Qt.AlignCenter)
             v.addWidget(warn, 1)
@@ -1242,10 +1306,7 @@ class LiveImageTab(QtWidgets.QWidget):
 
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
 
-        self.imv = pg.ImageView()
-        self.imv.ui.roiBtn.hide()
-        self.imv.ui.menuBtn.hide()
-        self.imv.view.invertY(True)
+        self.imv = self._make_cartesian_view()
         self.splitter.addWidget(self.imv)
 
         self.roi_plot = pg.PlotWidget()
@@ -1261,7 +1322,8 @@ class LiveImageTab(QtWidgets.QWidget):
         self.splitter.setStretchFactor(1, 0)
         v.addWidget(self.splitter, 1)
 
-        self.roi = pg.RectROI([100, 100], [300, 300], pen=pg.mkPen("r", width=2))
+        # In mm on the Cartesian plane.
+        self.roi = pg.RectROI([-50, -50], [100, 100], pen=pg.mkPen("r", width=2))
         self.roi.addScaleHandle([1, 1], [0, 0])
         self.roi.addScaleHandle([0, 0], [1, 1])
         self.roi.sigRegionChanged.connect(self._roi_moved)
@@ -1296,14 +1358,8 @@ class LiveImageTab(QtWidgets.QWidget):
         if view in self._mirror_views:
             return
         self._mirror_views.append(view)
-        if fabio is None:
+        if not self._enabled:
             return
-        try:
-            view.view.invertY(True)
-            view.ui.roiBtn.hide()
-            view.ui.menuBtn.hide()
-        except Exception:
-            pass
         if hasattr(self, "cmap_combo"):
             self._apply_colormap_to(view, self.cmap_combo.currentText())
         if self._raw is not None:
@@ -1325,14 +1381,40 @@ class LiveImageTab(QtWidgets.QWidget):
             except Exception:
                 pass
 
+    @staticmethod
+    def _make_cartesian_view() -> "pg.ImageView":
+        """An ImageView for hexrdgui's Cartesian image: x/y axes in mm, y up,
+        1:1 aspect. Also used for the Summary tab's mirror."""
+        plot = pg.PlotItem()
+        plot.setLabel("bottom", "x (mm)")
+        plot.setLabel("left", "y (mm)")
+        view = pg.ImageView(view=plot)
+        view.ui.roiBtn.hide()
+        view.ui.menuBtn.hide()
+        # ImageView inverts y by default; the image is placed in mm instead.
+        plot.invertY(False)
+        plot.setAspectLocked(True)
+        return view
+
+    def _set_view_image(self, view: "pg.ImageView", disp, reset_range: bool):
+        """Show `disp` (already in display orientation, see _show) in `view`,
+        placed at the Cartesian image's extent in mm."""
+        auto = self.auto_cb.isChecked()
+        view.setImage(disp, autoLevels=auto, autoRange=False,
+                      autoHistogramRange=auto)
+        if self._extent is not None:
+            left, right, bottom, top = self._extent
+            view.getImageItem().setRect(
+                QtCore.QRectF(left, bottom, right - left, top - bottom))
+        if reset_range:
+            view.autoRange()
+
     def _push_to_mirror(self, view: "pg.ImageView", reset_range: bool):
         if self._disp_counts is None:
             return
         disp = np.log10(self._disp_counts + 1.0) if self.log_cb.isChecked() else self._disp_counts
-        auto = self.auto_cb.isChecked()
         try:
-            view.setImage(disp, autoLevels=auto, autoRange=reset_range,
-                          autoHistogramRange=auto)
+            self._set_view_image(view, disp, reset_range)
         except Exception:
             pass
 
@@ -1424,7 +1506,10 @@ class LiveImageTab(QtWidgets.QWidget):
             self._show(self._raw, reset_range=False)
 
     def _show(self, data, reset_range):
-        counts = np.asarray(data, dtype=np.float32)
+        # Row 0 of hexrdgui's Cartesian image is its top edge (matplotlib's
+        # origin="upper"); this view draws row 0 at the bottom (y up), so
+        # flip once here. NaN marks places with no panel.
+        counts = np.asarray(data, dtype=np.float32)[::-1]
         counts = np.where(counts < 0, 0.0, counts)
         f = self.ds_spin.value()
         if f > 1:
@@ -1432,9 +1517,7 @@ class LiveImageTab(QtWidgets.QWidget):
         self._disp_counts = counts
         self._ds_factor = f
         disp = np.log10(counts + 1.0) if self.log_cb.isChecked() else counts
-        auto = self.auto_cb.isChecked()
-        self.imv.setImage(disp, autoLevels=auto, autoRange=reset_range,
-                          autoHistogramRange=auto)
+        self._set_view_image(self.imv, disp, reset_range)
         for view in self._mirror_views:
             self._push_to_mirror(view, reset_range=reset_range)
 
@@ -1442,26 +1525,28 @@ class LiveImageTab(QtWidgets.QWidget):
         if self._disp_counts is None:
             return
         img_item = self.imv.getImageItem()
-        vb = self.imv.getView()
-        if not vb.sceneBoundingRect().contains(pos):
+        plot = self.imv.getView()
+        if not plot.sceneBoundingRect().contains(pos):
             self.readout.setText("cursor: -")
             return
         mp = img_item.mapFromScene(pos)
-        col = int(mp.x())
-        row = int(mp.y())
+        col = int(np.floor(mp.x()))
+        row = int(np.floor(mp.y()))
         h, w = self._disp_counts.shape
         if 0 <= row < h and 0 <= col < w:
-            cnt = self._disp_counts[row, col]
+            val = self._disp_counts[row, col]
+            xy = plot.getViewBox().mapSceneToView(pos)
             f = self._ds_factor
-            det_r, det_c = row * f, col * f
             self.readout.setText(
-                "pixel (row=%d, col=%d)   counts=%d%s"
-                % (det_r, det_c, int(cnt), ("  [%dx binned]" % f) if f > 1 else ""))
+                "x=%.1f mm  y=%.1f mm   intensity=%s%s"
+                % (xy.x(), xy.y(), "no panel" if np.isnan(val) else "%.0f" % val,
+                   ("  [%dx binned]" % f) if f > 1 else ""))
         else:
             self.readout.setText("cursor: -")
 
-    def on_new_image(self, data, path, mtime, active_dir):
+    def on_new_image(self, data, extent, path, mtime, active_dir):
         self._raw = data
+        self._extent = extent
         self._show(data, reset_range=self._first)
         self._first = False
 
@@ -1483,10 +1568,8 @@ class LiveImageTab(QtWidgets.QWidget):
             self._fps_t0 = now
             self._fps_n = 0
 
-        try:
-            mx = int(np.max(data))
-        except ValueError:
-            mx = 0
+        finite = data[np.isfinite(data)]
+        mx = int(finite.max()) if finite.size else 0
         following = ""
         watched = self.path_edit.text().strip()
         if active_dir and watched and os.path.abspath(active_dir) != os.path.abspath(watched):
@@ -1497,22 +1580,28 @@ class LiveImageTab(QtWidgets.QWidget):
                now - mtime, self._last_fps, following))
 
     def apply_theme(self):
-        """Re-skin the ROI plot after a theme switch (the image view itself
-        uses its own colormap, independent of the app theme)."""
-        if fabio is None or not hasattr(self, "roi_plot"):
+        """Re-skin the ROI plot and the image views' mm axes after a theme
+        switch (the image itself uses its own colormap, independent of the
+        app theme)."""
+        if not self._enabled or not hasattr(self, "roi_plot"):
             return
         self.roi_plot.setBackground(BG_PANEL)
-        for axis_name in ("bottom", "left"):
-            axis = self.roi_plot.getAxis(axis_name)
-            if axis is not None:
-                axis.setPen(pg.mkPen(TEXT_PRIMARY))
-                axis.setTextPen(pg.mkPen(TEXT_PRIMARY))
+        axes_owners = [self.roi_plot]
+        for view in [self.imv] + self._mirror_views:
+            view.ui.graphicsView.setBackground(BG_PANEL)
+            axes_owners.append(view.getView())
+        for owner in axes_owners:
+            for axis_name in ("bottom", "left"):
+                axis = owner.getAxis(axis_name)
+                if axis is not None:
+                    axis.setPen(pg.mkPen(TEXT_PRIMARY))
+                    axis.setTextPen(pg.mkPen(TEXT_PRIMARY))
 
     def stop(self):
         """Stop the background loader thread — called from the main
         window's closeEvent so the app can exit cleanly instead of leaving
         a polling thread running."""
-        if fabio is None:
+        if self.loader is None:
             return
         try:
             self.loader.stop()
@@ -2193,10 +2282,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.summary_plot_panel = PlotPanel()
         splitter.addWidget(self.summary_plot_panel)
 
-        self.summary_imv = pg.ImageView()
-        self.summary_imv.ui.roiBtn.hide()
-        self.summary_imv.ui.menuBtn.hide()
-        self.summary_imv.view.invertY(True)
+        self.summary_imv = LiveImageTab._make_cartesian_view()
         splitter.addWidget(self.summary_imv)
 
         splitter.setStretchFactor(0, 1)
@@ -2463,11 +2549,11 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         enables "auto-search subfolders", since the actual scan currently
         being written is nearly always one or more levels beneath
         whichever of these folders is found (e.g. raw6M/<sample>/<scan>/).
-        A no-op if fabio isn't installed -- the Live Image tab has no
-        folder/recurse controls at all in that case (see its fabio-is-None
-        guard in _build_ui)."""
+        A no-op if the Live Image tab is disabled (no hexrdgui or no
+        instrument configured) -- it has no folder/recurse controls then
+        (see LiveImageTab._build_ui)."""
         tab = getattr(self, "live_image_tab", None)
-        if tab is None or fabio is None or not hasattr(tab, "path_edit"):
+        if tab is None or tab.loader is None or not hasattr(tab, "path_edit"):
             return
         spec_parent = os.path.dirname(os.path.abspath(spec_path))
         folder = None
