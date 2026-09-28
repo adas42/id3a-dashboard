@@ -3391,7 +3391,12 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
     def _refresh_motor_positions_table(self):
         motors_meta, scans_data = sc.build_motor_positions(self.metadata, self.scan_info)
-        col_labels = [m["mnemonic"] or m["name"] for m in motors_meta]
+        # The file's mnemonics (#o) when it has them, else the motor names
+        # (#O) -- ID3A's spec.log has only #O. build_motor_positions fills
+        # missing mnemonics with placeholders (m0, m1, ...), never shown.
+        n_mnemonics = len(self.metadata.get("motor_mnemonics") or [])
+        col_labels = [m["mnemonic"] if m["index"] < n_mnemonics else m["name"]
+                      for m in motors_meta]
         headers = ["Scan #", "Command"] + col_labels
         self.motor_table.setColumnCount(len(headers))
         self.motor_table.setHorizontalHeaderLabels(headers)
