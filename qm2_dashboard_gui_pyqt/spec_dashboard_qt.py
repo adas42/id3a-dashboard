@@ -61,6 +61,7 @@ from reportlab.platypus import (
 import beamline_config as bcfg
 import spec_core as sc
 import chess_signals as csig
+import ion_chamber_flux as icf
 
 # hexrdgui is only needed for the Live Image tab, which renders detector
 # frames with hexrdgui's Cartesian view (hexrd_display.py). It takes seconds
@@ -394,6 +395,15 @@ QScrollArea {{
     border: none;
 }}
 """
+
+
+def _apply_link_color(app: "QtWidgets.QApplication"):
+    """Rich-text links take their colour from the palette, not the
+    stylesheet; Qt's default dark blue is unreadable on the dark theme."""
+    palette = app.palette()
+    for role in (QtGui.QPalette.Link, QtGui.QPalette.LinkVisited):
+        palette.setColor(role, QtGui.QColor(ACCENT))
+    app.setPalette(palette)
 
 
 _apply_theme_globals("dark")
@@ -2173,6 +2183,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.setStyleSheet(_build_qss())
+            _apply_link_color(app)
         pg.setConfigOptions(antialias=True, background=BG_PANEL, foreground=TEXT_PRIMARY,
                              imageAxisOrder="row-major")
 
@@ -2283,6 +2294,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._build_live_image_tab()
         self._build_summary_tab()
         self._build_slack_alerts_tab()
+        self._build_ion_flux_tab()
         self._build_export_tab()
 
         # Re-order the tabs on-screen to match the config's `tabs:` list,
@@ -2519,6 +2531,166 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
         self.slack_alerts_tab_widget = w
         self._add_tab("slack_alerts", w)
+
+    # ------------------------------------------------------------------
+    # Ion Chamber Flux tab
+    # ------------------------------------------------------------------
+    _ICF_INPUTS = (
+        # key (ion_chamber_flux argument), label, default
+        ("e_ion", "Ionization energy (eV)", icf.GASES["Nitrogen"]["e_ion"]),
+        ("density", "Gas density (g/cm3)", icf.GASES["Nitrogen"]["density"]),
+        ("energy_ev", "Energy (eV)", 10000.0),
+        ("length_cm", "Chamber length (cm)", 6.0),
+        ("counts", "Counts (cts/s)", 1.0),
+        ("gain", "Counter range (A/V)", 1e-8),
+    )
+    _ICF_RESULTS = (
+        ("transmission", "Transmission"),
+        ("a_gas", "aGas (cm2/g)"),
+        ("a_gas_cm", "aGas (1/cm)"),
+        ("current", "Current (A)"),
+        ("flux", "Flux (ph/s)"),
+    )
+
+    def _build_ion_flux_tab(self):
+        """"Ion Chamber Flux" tab: X-ray flux from ion chamber counts, a
+        port of the CHESS web calculator (the maths is in
+        ion_chamber_flux.py). The credit line at the bottom is the
+        original's."""
+        w = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(w)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        outer.addWidget(scroll)
+        content = QtWidgets.QWidget()
+        scroll.setWidget(content)
+        layout = QtWidgets.QVBoxLayout(content)
+
+        intro = QtWidgets.QLabel(
+            "X-ray attenuation/absorption data are from the "
+            '<a href="https://physics.nist.gov/PhysRefData/FFast/html/form.html">NIST database</a>. '
+            "The average ionization energies are from the "
+            '<a href="http://www-ssrl.slac.stanford.edu/mes/xafs/flux.html">SLAC web site</a>. '
+            "Standard CHESS chamber lengths: short: 6 cm, long: 27 cm."
+        )
+        intro.setWordWrap(True)
+        intro.setOpenExternalLinks(True)
+        intro.setProperty("secondaryText", True)
+        layout.addWidget(intro)
+
+        row = QtWidgets.QHBoxLayout()
+        inputs_box = QtWidgets.QGroupBox("Inputs")
+        form = QtWidgets.QFormLayout(inputs_box)
+        self.icf_gas = QtWidgets.QComboBox()
+        self.icf_gas.addItems(list(icf.GASES))
+        self.icf_gas.currentTextChanged.connect(self._on_icf_gas_changed)
+        form.addRow("Gas:", self.icf_gas)
+        self.icf_method = QtWidgets.QComboBox()
+        self.icf_method.addItems(icf.METHODS)
+        form.addRow("Absorption mechanism:", self.icf_method)
+        self.icf_inputs: Dict[str, QtWidgets.QLineEdit] = {}
+        for key, label, default in self._ICF_INPUTS:
+            edit = QtWidgets.QLineEdit("%g" % default)
+            edit.returnPressed.connect(self._calculate_ion_flux)
+            form.addRow(label + ":", edit)
+            self.icf_inputs[key] = edit
+        buttons = QtWidgets.QHBoxLayout()
+        calc_btn = QtWidgets.QPushButton("Calculate")
+        calc_btn.clicked.connect(self._calculate_ion_flux)
+        buttons.addWidget(calc_btn)
+        reset_btn = QtWidgets.QPushButton("Reset")
+        reset_btn.clicked.connect(self._reset_ion_flux)
+        buttons.addWidget(reset_btn)
+        buttons.addStretch(1)
+        form.addRow("", buttons)
+        row.addWidget(inputs_box)
+
+        results_box = QtWidgets.QGroupBox("Results")
+        results_form = QtWidgets.QFormLayout(results_box)
+        self.icf_results: Dict[str, QtWidgets.QLineEdit] = {}
+        for key, label in self._ICF_RESULTS:
+            out = QtWidgets.QLineEdit()
+            out.setReadOnly(True)
+            results_form.addRow(label + ":", out)
+            self.icf_results[key] = out
+        self.icf_message = QtWidgets.QLabel("")
+        self.icf_message.setWordWrap(True)
+        results_form.addRow("", self.icf_message)
+        row.addWidget(results_box)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        notes = QtWidgets.QLabel(
+            "<p>The calculator uses a simple model to calculate the X-ray flux "
+            "from the ion chamber current data. The model includes "
+            "single-ionization of the gas, and does not take into account "
+            "secondary effects such as charge recombination or the "
+            "space-charge effect. Counts are the counter rate (Hz) of the "
+            "ion chamber current amplifier, whose gain is the counter range "
+            "(A/V).</p>"
+            "<p><b>Example 1:</b> at station A2 with multi-layer optics at "
+            "10 keV, the 6 cm N2 ion chamber count was 109400 at 1E-6 gain. "
+            "The calculated flux: 9.6E11 ph/s.<br>"
+            "<b>Example 2:</b> at station A2 with &lt;111&gt; optics at 50 keV, "
+            "the 6 cm N2 ion chamber count was 722000 at 1E-10 gain. The "
+            "calculated flux: 2.55E9 ph/s.</p>"
+        )
+        notes.setWordWrap(True)
+        notes.setProperty("secondaryText", True)
+        layout.addWidget(notes)
+        layout.addStretch(1)
+
+        courtesy = QtWidgets.QLabel(
+            "&copy; Peter Revesz (pr20@cornell.edu), CHESS, (2007). "
+            "last change: 11/12/2013<br>"
+            "Courtesy of the CHESS "
+            '<a href="https://www.chess.cornell.edu/userstechnical-resourcescalculators/'
+            'ion-chamber-flux-calculator">Ion Chamber Flux Calculator</a>.'
+        )
+        courtesy.setOpenExternalLinks(True)
+        courtesy.setProperty("secondaryText", True)
+        courtesy.setStyleSheet("font-size: 9pt;")
+        layout.addWidget(courtesy)
+
+        self._calculate_ion_flux()
+        self._add_tab("ion_flux", w)
+
+    def _on_icf_gas_changed(self, gas: str):
+        """Fill in the chosen gas's default ionization energy and density,
+        as the web calculator does."""
+        self.icf_inputs["e_ion"].setText("%g" % icf.GASES[gas]["e_ion"])
+        self.icf_inputs["density"].setText("%g" % icf.GASES[gas]["density"])
+
+    def _reset_ion_flux(self):
+        self.icf_gas.setCurrentIndex(0)
+        self.icf_method.setCurrentIndex(0)
+        for key, _label, default in self._ICF_INPUTS:
+            self.icf_inputs[key].setText("%g" % default)
+        self._calculate_ion_flux()
+
+    def _calculate_ion_flux(self):
+        try:
+            values = {key: float(edit.text()) for key, edit in self.icf_inputs.items()}
+        except ValueError:
+            self.icf_message.setText("Every input must be a number.")
+            return
+        try:
+            result = icf.ion_chamber_flux(
+                self.icf_gas.currentText(), self.icf_method.currentIndex(), **values)
+        except (ValueError, ZeroDivisionError, OverflowError) as exc:
+            self.icf_message.setText(f"Can't calculate: {exc}")
+            return
+        self.icf_results["transmission"].setText("%.4g" % result["transmission"])
+        self.icf_results["a_gas"].setText("%.4g" % result["a_gas"])
+        self.icf_results["a_gas_cm"].setText("%.4g" % result["a_gas_cm"])
+        self.icf_results["current"].setText("%.4g" % result["current"])
+        self.icf_results["flux"].setText("%.2e" % result["flux"])
+        lo, hi = icf.VALID_RANGE_EV
+        if lo <= values["energy_ev"] <= hi:
+            self.icf_message.setText("")
+        else:
+            self.icf_message.setText("Energy should be between 5000-100000 eV!")
 
     def _on_tab_changed(self, _index: int):
         """Start/stop the Summary tab's 0.1s plot-refresh timer as it
@@ -5119,6 +5291,7 @@ def main():
     app.setApplicationName(APP_TITLE)
     app.setStyle("Fusion")
     app.setStyleSheet(_build_qss())
+    _apply_link_color(app)
     window = SpecDashboardApp()
     window.show()
     sys.exit(app.exec())

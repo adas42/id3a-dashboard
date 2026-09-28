@@ -65,6 +65,11 @@ tabs:
     description: >-
       Export all data, just the plotted data, or a chosen set of
       scans/columns to CSV.
+  - key: ion_flux
+    label: Ion Chamber Flux
+    description: >-
+      X-ray flux from ion chamber counts (gas, chamber length, energy,
+      counter range), ported from the CHESS web calculator.
   - key: slack_alerts
     label: Slack Alerts
     description: >-
