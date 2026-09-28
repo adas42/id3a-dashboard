@@ -1,5 +1,6 @@
 PySide6    # Qt 6, same binding as hexrd/hexrdgui
 PyYAML     # beamline config files in configs/
+pyepics    # EPICS Channel Access: reading PVs straight from the IOCs
 pyqtgraph
 pandas
 numpy

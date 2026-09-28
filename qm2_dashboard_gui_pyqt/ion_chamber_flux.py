@@ -144,6 +144,34 @@ STANDARD_LENGTHS_CM = {"short": 6.0, "long": 27.0}   # standard CHESS chambers
 VALID_RANGE_EV = (5000.0, 100000.0)
 
 
+_PREFIXES = {"": 1.0, "p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3}
+_ENERGY_UNITS = {"ev": 1.0, "kev": 1e3, "mev": 1e6}
+
+
+def energy_to_ev(value: float, unit: str) -> float:
+    """An energy in eV, keV or MeV (e.g. a PV reading "51.996 keV") in eV,
+    as ion_chamber_flux() takes it. Raises ValueError for other units."""
+    factor = _ENERGY_UNITS.get(unit.strip().lower())
+    if factor is None:
+        raise ValueError(f"Unknown energy unit {unit!r}")
+    return value * factor
+
+
+def amps_per_volt(value: float, units: str) -> float:
+    """An amplifier setting as the calculator's counter range (A/V).
+    Sensitivity units ("nA/V", "uA/V", ...) scale the value; gain units
+    ("V/nA", "V/A", ...) are inverted. Raises ValueError for anything else,
+    so an unexpected units PV can't give a silently wrong flux."""
+    u = units.replace(" ", "")
+    for prefix, factor in _PREFIXES.items():
+        if u == f"{prefix}A/V":
+            return value * factor
+        if u == f"V/{prefix}A":
+            # value volts per (factor) amps -> factor / value amps per volt
+            return factor / value
+    raise ValueError(f"Unknown amplifier units {units!r}")
+
+
 def _quadratic(values: List[float], energy_kev: float) -> float:
     """The original's 3-point quadratic interpolation of a table at
     ENERGIES_KEV, through the last tabulated energy below `energy_kev` and

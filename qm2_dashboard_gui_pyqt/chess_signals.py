@@ -147,6 +147,30 @@ def is_no_beam(value: Optional[float], threshold: Optional[float] = None) -> boo
     return abs(value) < threshold
 
 
+_LEADING_NUMBER = re.compile(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(.*)")
+
+
+def split_quantity(value) -> Optional[tuple]:
+    """(number, unit text) from a PV value: 3.67 -> (3.67, ""),
+    "51.996 keV" -> (51.996, "keV"). None if it isn't a number or a text
+    starting with one."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value), ""
+    match = _LEADING_NUMBER.fullmatch(str(value))
+    if not match:
+        return None
+    return float(match.group(1)), match.group(2).strip()
+
+
+def leading_number(value) -> Optional[float]:
+    """A PV value as a float, reading text like "51.996 keV" by its leading
+    number. None if there's no number."""
+    quantity = split_quantity(value)
+    return quantity[0] if quantity else None
+
+
 # ---------------------------------------------------------------------
 # SPEC-file column matching
 # ---------------------------------------------------------------------
@@ -239,7 +263,7 @@ class ChessSignalsClient:
                 }
             )
 
-    def fetch_raw(self, pv_name: str) -> Optional[float]:
+    def _fetch_last(self, pv_name: str):
         """GET {base_url}/plot/UPDATE_{pv_name}. The confirmed-working
         response shape is a JSON array; the live value is the last element.
         Returns None on any error (non-200, non-JSON, empty array,
@@ -257,11 +281,20 @@ class ChessSignalsClient:
         except ValueError:
             return None
         if isinstance(data, list) and data:
-            try:
-                return float(data[-1])
-            except (ValueError, TypeError):
-                return None
+            return data[-1]
         return None
+
+    def fetch_raw(self, pv_name: str) -> Optional[float]:
+        """The PV's latest value as a number. Some PVs come back as text
+        with units (ID3A_MON_KEV gives "51.996 keV"); those are read by
+        their leading number. None if unavailable or not numeric."""
+        return leading_number(self._fetch_last(pv_name))
+
+    def fetch_text(self, pv_name: str) -> Optional[str]:
+        """The PV's latest value as text, units included (e.g. "51.996 keV",
+        "nA/V"). None if unavailable."""
+        value = self._fetch_last(pv_name)
+        return None if value is None else str(value).strip()
 
     def get_values(self, pv_map: Dict[str, Dict]) -> Dict[str, Optional[float]]:
         """Fetch + validate + scale every channel in pv_map (a dict shaped

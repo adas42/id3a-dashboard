@@ -2356,6 +2356,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         # channels still shows its title, so every configured section is
         # visible even when it's blank.
         self.signal_labels: Dict[str, List[QtWidgets.QLabel]] = {}
+        # channel -> [flux labels] for signals.flux.chambers.
+        self.flux_readouts: Dict[str, list] = {}
         self.beam_network_checkbox = QtWidgets.QCheckBox(
             "Try live network fetch (on-site/CHESS network only)"
         )
@@ -2376,6 +2378,30 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             "without a PV always come from the SPEC file."
         )
 
+        # The flux readouts' energy and amplifier gains are read over EPICS
+        # only when Refresh is clicked, never polled (see _refresh_flux_inputs).
+        has_flux = bool(CONFIG["signals"]["flux"]["chambers"])
+        self._flux_inputs = None
+        self._last_signal_values = ({}, False)
+        self.flux_refresh_btn = QtWidgets.QPushButton("Refresh gains && energy")
+        self.flux_refresh_btn.setToolTip(
+            "Read the X-ray energy and the ion chamber amplifier gains (EPICS "
+            "Channel Access) for the flux readouts. They are not read automatically."
+        )
+        self.flux_refresh_btn.clicked.connect(self._refresh_flux_inputs)
+        self.flux_refresh_label = QtWidgets.QLabel("gains & energy not read yet")
+        self.flux_refresh_label.setProperty("secondaryText", True)
+        # One gas for every chamber's flux readout.
+        self.flux_gas_combo = QtWidgets.QComboBox()
+        self.flux_gas_combo.addItems(list(self._FLUX_GASES))
+        default_gas = CONFIG["signals"]["flux"].get("gas") or "Nitrogen"
+        for short, name in self._FLUX_GASES.items():
+            if default_gas in (short, name):
+                self.flux_gas_combo.setCurrentText(short)
+        self.flux_gas_combo.setToolTip("Ion chamber gas for all the flux readouts")
+        self.flux_gas_combo.currentTextChanged.connect(
+            lambda _text: self._update_flux_readouts(*self._last_signal_values))
+
         groups = CONFIG["summary"]["groups"]
         for i, group in enumerate(groups):
             header = QtWidgets.QLabel(group.get("title") or "")
@@ -2384,12 +2410,25 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             row = QtWidgets.QHBoxLayout()
             for canonical in group.get("channels") or []:
                 row.addWidget(self._make_signal_card(canonical))
+            if i == 0 and has_flux:
+                row.addWidget(self._make_energy_card())
             row.addStretch(1)
-            if i == 0:
+            if i == 0 and not has_flux:
                 # Governs every channel, not just this group's; it sits at
                 # the end of the first row.
                 row.addWidget(self.beam_network_checkbox)
             layout.addLayout(row)
+            if i == 0 and has_flux:
+                # The cards fill the first row, so the flux controls and the
+                # network checkbox get their own line under it.
+                controls = QtWidgets.QHBoxLayout()
+                controls.addWidget(QtWidgets.QLabel("Gas:"))
+                controls.addWidget(self.flux_gas_combo)
+                controls.addWidget(self.flux_refresh_btn)
+                controls.addWidget(self.flux_refresh_label)
+                controls.addStretch(1)
+                controls.addWidget(self.beam_network_checkbox)
+                layout.addLayout(controls)
         if not groups:
             layout.addWidget(self.beam_network_checkbox)
 
@@ -2433,21 +2472,170 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.summary_tab_widget = w
         self._add_tab("summary", w)
 
-    def _make_signal_card(self, canonical: str) -> QtWidgets.QFrame:
-        """One Summary-tab readout card: the channel's label and a big
-        value, registered in self.signal_labels for _beam_signals_tick()."""
+    def _make_card(self, title: str):
+        """A small boxed Summary-tab card: a title and a big value. Returns
+        (card, its layout, the value label)."""
         box = QtWidgets.QFrame()
         box.setFrameShape(QtWidgets.QFrame.StyledPanel)
         box_layout = QtWidgets.QVBoxLayout(box)
         box_layout.setContentsMargins(10, 6, 10, 6)
-        name_lbl = QtWidgets.QLabel(csig.CHANNELS[canonical]["label"])
+        name_lbl = QtWidgets.QLabel(title)
         name_lbl.setProperty("secondaryText", True)
         value_lbl = QtWidgets.QLabel("—")
         value_lbl.setStyleSheet("font-size: 12pt; font-weight: bold;")
         box_layout.addWidget(name_lbl)
         box_layout.addWidget(value_lbl)
+        return box, box_layout, value_lbl
+
+    def _make_signal_card(self, canonical: str) -> QtWidgets.QFrame:
+        """One Summary-tab readout card: the channel's label and a big
+        value, registered in self.signal_labels for _beam_signals_tick().
+        Chambers in signals.flux.chambers also get a small flux readout
+        under the value, filled in by _update_flux_readouts()."""
+        box, box_layout, value_lbl = self._make_card(csig.CHANNELS[canonical]["label"])
         self.signal_labels.setdefault(canonical, []).append(value_lbl)
+        if canonical in CONFIG["signals"]["flux"]["chambers"]:
+            flux_lbl = QtWidgets.QLabel("— ph/s")
+            flux_lbl.setStyleSheet("font-size: 8pt;")
+            box_layout.addWidget(flux_lbl)
+            self.flux_readouts.setdefault(canonical, []).append(flux_lbl)
         return box
+
+    def _make_energy_card(self) -> QtWidgets.QFrame:
+        """A card, styled like the channel cards, for the X-ray energy the
+        flux readouts use -- read when Refresh is clicked, not live."""
+        box, _layout, self.energy_value_lbl = self._make_card("Energy")
+        self.energy_value_lbl.setToolTip(
+            "X-ray energy from %s, used by the flux readouts; read when "
+            "Refresh gains & energy is clicked." % CONFIG["signals"]["flux"].get("energy_pv"))
+        return box
+
+    # Gas dropdown text on the flux readouts -> ion_chamber_flux gas name.
+    _FLUX_GASES = {"N2": "Nitrogen", "Ar": "Argon", "He": "He", "Xe": "Xe", "Kr": "Kr"}
+
+    def _refresh_flux_inputs(self):
+        """Read the energy and each chamber's amplifier sensitivity for the
+        flux readouts over EPICS Channel Access -- all PVs in parallel, as
+        the IOC's state names (e.g. "20" and "nA/V") -- and keep them until
+        the next click. Runs only when the Refresh button is clicked."""
+        flux_cfg = CONFIG["signals"]["flux"]
+        try:
+            import epics
+        except ImportError:
+            self.flux_refresh_label.setText("pyepics isn't installed")
+            return
+        names = [flux_cfg.get("energy_pv")]
+        for chamber in flux_cfg["chambers"].values():
+            names += [chamber.get("gain_pv"), chamber.get("gain_units_pv")]
+        names = [name for name in names if name]
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            texts = epics.caget_many(names, as_string=True,
+                                     connection_timeout=2.0, timeout=2.0)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        got = dict(zip(names, texts))
+
+        problems = []
+        energy_text = got.get(flux_cfg.get("energy_pv"))
+        quantity = csig.split_quantity(energy_text)
+        try:
+            energy_ev = icf.energy_to_ev(*quantity) if quantity else None
+        except ValueError:
+            energy_ev = None
+        if energy_ev is None:
+            problems.append("energy %s: %r" % (flux_cfg.get("energy_pv"), energy_text))
+
+        gains = {}
+        for canonical, chamber in flux_cfg["chambers"].items():
+            num_text = got.get(chamber.get("gain_pv"))
+            unit_text = got.get(chamber.get("gain_units_pv"))
+            number = csig.leading_number(num_text)
+            try:
+                gain = icf.amps_per_volt(number, unit_text or "") if number is not None else None
+            except (ValueError, ZeroDivisionError):
+                gain = None
+            gains[canonical] = (gain, "%s %s" % (num_text, unit_text)) if gain is not None else None
+            if gain is None:
+                problems.append("%s gain: %r %r" % (canonical, num_text, unit_text))
+
+        stamp = time.strftime("%H:%M:%S")
+        self._flux_inputs = {"energy_ev": energy_ev, "energy_text": energy_text,
+                             "gains": gains, "time": stamp}
+        status = "gains & energy read %s" % stamp
+        self.flux_refresh_label.setText(status + (" (problems, see tooltip)" if problems else ""))
+        if hasattr(self, "energy_value_lbl"):
+            self.energy_value_lbl.setText(energy_text if energy_ev is not None else "—")
+        self.flux_refresh_label.setToolTip("\n".join(problems) if problems else "\n".join(
+            "%s: %s" % (canonical, gain[1]) for canonical, gain in gains.items()))
+        self._update_flux_readouts(*self._last_signal_values)
+
+    def _update_flux_readouts(self, values: Dict[str, Dict], use_network: bool):
+        """Fill in the flux under each chamber in signals.flux.chambers from
+        its live voltage, with the CHESS calculator's model (see
+        ion_chamber_flux.py): counts = volts x counts_per_volt, the energy
+        and amplifier range (A/V) as last read by the Refresh button, and
+        the gas picked on the card. Shows "—" with a tooltip naming what's
+        missing until all of that is available."""
+        if not self.flux_readouts:
+            return
+        flux_cfg = CONFIG["signals"]["flux"]
+        counts_per_volt = flux_cfg.get("counts_per_volt")
+        inputs = self._flux_inputs
+
+        common_missing = []
+        if counts_per_volt is None:
+            common_missing.append("signals.flux.counts_per_volt in the config")
+        if inputs is None:
+            common_missing.append("the gains and energy (click Refresh gains & energy)")
+        elif inputs["energy_ev"] is None:
+            common_missing.append("a readable energy (got %r; click Refresh again)"
+                                  % inputs["energy_text"])
+        energy_ev = inputs["energy_ev"] if inputs else None
+        energy_text = inputs["energy_text"] if inputs else None
+
+        for canonical, readouts in self.flux_readouts.items():
+            chamber = flux_cfg["chambers"][canonical]
+            missing = list(common_missing)
+            info = values.get(canonical) or {}
+            volts = info.get("value") if info.get("source") == "network" else None
+            if volts is None:
+                if not use_network:
+                    missing.append("the live network fetch (checkbox above)")
+                elif info.get("source") == "spec":
+                    missing.append("the live voltage (a SPEC column is counts, not volts)")
+                else:
+                    missing.append("a live voltage")
+
+            gain = gain_text = None
+            if inputs is not None:
+                if inputs["gains"].get(canonical) is None:
+                    missing.append("a readable gain for %s (see the Refresh tooltip)" % canonical)
+                else:
+                    gain, gain_text = inputs["gains"][canonical]
+
+            for flux_lbl in readouts:
+                if missing:
+                    flux_lbl.setText("— ph/s")
+                    flux_lbl.setToolTip("Flux needs: " + "; ".join(missing))
+                    continue
+                gas = self._FLUX_GASES[self.flux_gas_combo.currentText()]
+                table = icf.GASES[gas]
+                counts = volts * counts_per_volt
+                length = chamber.get("length_cm", 6.0)
+                flux = icf.ion_chamber_flux(gas, 0, table["e_ion"], table["density"],
+                                            energy_ev, length, counts, gain)["flux"]
+                flux_lbl.setText("%.2e ph/s" % flux)
+                lo, hi = icf.VALID_RANGE_EV
+                note = "" if lo <= energy_ev <= hi else "\nEnergy outside the calculator's 5-100 keV tables!"
+                flux_lbl.setToolTip(
+                    "%.3e ph/s  (CHESS ion chamber flux model, total less elastic)\n"
+                    "%.4g V x %g cts/V = %.4g cts/s\n"
+                    "amplifier %s = %.3g A/V\n"
+                    "energy %s = %.1f eV\n"
+                    "%s, %g cm chamber%s"
+                    % (flux, volts, counts_per_volt, counts, gain_text, gain,
+                       energy_text, energy_ev, gas, length, note))
 
     def _build_slack_alerts_tab(self):
         """Its own tab (moved out of Overall Summary per the user's
@@ -4208,6 +4396,9 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             for lbl in labels:
                 lbl.setText(text)
                 lbl.setToolTip(tooltip)
+
+        self._last_signal_values = (values, use_network)
+        self._update_flux_readouts(values, use_network)
 
         no_beam_channel = CONFIG["signals"]["no_beam"].get("channel")
         if not no_beam_channel:

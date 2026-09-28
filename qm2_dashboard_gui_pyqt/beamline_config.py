@@ -106,5 +106,15 @@ def load_config(path: Optional[str] = None) -> Dict:
             "defined under signals.channels"
         )
 
+    flux = cfg["signals"].get("flux") or {}
+    flux["chambers"] = flux.get("chambers") or {}
+    cfg["signals"]["flux"] = flux
+    for canonical in flux["chambers"]:
+        if canonical not in channels:
+            raise ConfigError(
+                f"{path}: signals.flux.chambers lists {canonical!r}, which is "
+                "not defined under signals.channels"
+            )
+
     cfg["_path"] = path
     return cfg

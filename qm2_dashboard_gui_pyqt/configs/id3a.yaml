@@ -110,12 +110,29 @@ signals:
     # Monochromator stabilizer, counter CNT06.
     mostab: {label: MOSTAB, spec_patterns: [mostab], pv: ID3A_CNT06_VLT, multiplier: 1, range: null}
 
+  # Flux readout under each listed ion chamber's card, from its live
+  # voltage, with the CHESS calculator's model (Ion Chamber Flux tab).
+  # One gas for all chambers, picked on the Summary tab; `gas` is the default.
+  # The energy and amplifier PVs are read over EPICS Channel Access
+  # (pyepics), only when the Summary tab's Refresh button is clicked.
+  flux:
+    energy_pv: ID3A_MON_KEV            # a string PV, e.g. "51.996 keV"
+    counts_per_volt: 100000            # counts = volts x this
+    gas: Nitrogen
+    chambers:
+      # The SR570 amplifier of each chamber (IC0 -> AMP01, ...): its
+      # sensitivity number and units, read as the IOC's state names
+      # (e.g. "20" and "nA/V").
+      ic0: {length_cm: 6, gain_pv: "ID3A_AMP01:sens_num.VAL", gain_units_pv: "ID3A_AMP01:sens_unit.VAL"}
+      ic1: {length_cm: 6, gain_pv: "ID3A_AMP02:sens_num.VAL", gain_units_pv: "ID3A_AMP02:sens_unit.VAL"}
+      ic2: {length_cm: 6, gain_pv: "ID3A_AMP03:sens_num.VAL", gain_units_pv: "ID3A_AMP03:sens_unit.VAL"}
+      ic3: {length_cm: 6, gain_pv: "ID3A_AMP04:sens_num.VAL", gain_units_pv: "ID3A_AMP04:sens_unit.VAL"}
+      ic4: {length_cm: 6, gain_pv: "ID3A_AMP05:sens_num.VAL", gain_units_pv: "ID3A_AMP05:sens_unit.VAL"}
+
 summary:
   groups:
     - title: Beam Condition
-      channels: [cesr, ic0, ic1, ic2, ic3, ic4, diode]
-    - title: ID3A Counters (V)
-      channels: [mostab]
+      channels: [cesr, ic0, ic1, ic2, ic3, ic4, diode, mostab]
 
 plot:
   default_y_priority: [ic1, diode, I0, I1]     # TODO(ID3A)
