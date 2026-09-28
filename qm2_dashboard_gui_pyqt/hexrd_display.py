@@ -94,7 +94,21 @@ def load_detector_files(
         ims_dict[name] = ims
 
     n_frames = min(len(ims) for ims in ims_dict.values())
-    config.current_imageseries_idx = frame % n_frames
+    idx = frame if frame >= 0 else n_frames + frame
+    if not 0 <= idx < n_frames:
+        raise IndexError(f"Frame {frame} out of range; the files have {n_frames}")
+    config.current_imageseries_idx = idx
+
+
+def count_frames(path: str, hdf5_path: Optional[Sequence[str]] = None) -> int:
+    """Number of frames in one detector file. hexrd opens files lazily, so
+    this reads only the file's header, not its images."""
+    from hexrdgui.image_file_manager import ImageFileManager
+
+    manager = ImageFileManager()
+    if hdf5_path:
+        manager.path = list(hdf5_path)
+    return len(manager.open_file(path))
 
 
 def render_cartesian() -> Tuple[np.ma.MaskedArray, Tuple[float, float, float, float]]:

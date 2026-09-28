@@ -357,6 +357,20 @@ QScrollBar::add-line, QScrollBar::sub-line {{
 QSplitter::handle {{
     background: {BORDER};
 }}
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {BORDER};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {ACCENT};
+    width: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
+}}
+QSlider::handle:horizontal:hover {{
+    background: {ACCENT_HOVER};
+}}
 QMenuBar {{
     background-color: {BG_PANEL};
     color: {TEXT_PRIMARY};
@@ -413,7 +427,7 @@ def _apply_config(cfg: Dict):
     global CONFIG, APP_TITLE, HOME_PAGE_TITLE
     global EMAIL_SETTINGS_PATH, SLACK_SETTINGS_PATH, SLACK_DEFAULT_CHANNEL
     global _DEFAULT_Y_PRIORITY, _X_FALLBACK_COLUMNS, _CALIBRATION_FILES
-    global LIVE_FRAME_EXT, _LIVE_FRAME_NO_RE
+    global LIVE_FRAME_EXT
     global LIVE_INSTRUMENT, LIVE_PANELS, LIVE_HDF5_PATH
     CONFIG = cfg
     app = cfg["app"]
@@ -432,7 +446,6 @@ def _apply_config(cfg: Dict):
 
     live = cfg["live_image"]
     LIVE_FRAME_EXT = live.get("frame_extension") or ".cbf"
-    _LIVE_FRAME_NO_RE = re.compile(r"(\d+)" + re.escape(LIVE_FRAME_EXT) + "$")
     instrument = live.get("instrument")
     LIVE_INSTRUMENT = os.path.expanduser(instrument) if instrument else None
     LIVE_PANELS = dict(live.get("panels") or {})
@@ -856,11 +869,9 @@ def _style_summary_chart(panel: "PlotPanel", title: str, y_label: str = ""):
 LIVE_COLORMAPS = ["viridis", "inferno", "magma", "plasma",
                    "cividis", "turbo", "gray", "jet"]
 
-# Detector frame extension to watch, and the regex that pulls the frame
-# number out of a frame's filename -- both from the config's
+# Detector frame extension to watch, from the config's
 # live_image.frame_extension (set by _apply_config()).
 LIVE_FRAME_EXT = ".cbf"
-_LIVE_FRAME_NO_RE = re.compile(r"(\d+)\.cbf$")
 # From the rest of the config's live_image section: the hexrd instrument
 # file, {panel name (= frame file prefix): flip or None}, and the
 # (group, dataset) of the images in plain HDF5 frame files.
@@ -936,12 +947,12 @@ class _LiveFlowLayout(QtWidgets.QLayout):
         return y + line_height - rect.y()
 
 
-def _live_find_newest_frames(folder):
-    """Newest frame file of each configured panel in one folder, by FILENAME
-    (frame numbers are zero-padded, so the highest name is the newest).
-    Frame files are named <panel>_<image_n><LIVE_FRAME_EXT>. Returns
-    {panel: path} for the panels found. Read-only."""
-    best = {}
+def _live_scan_files(folder):
+    """Frame files of each configured panel in one folder, sorted by FILENAME
+    (image numbers are zero-padded, so the last one is the newest). Frame
+    files are named <panel>_<image_n><LIVE_FRAME_EXT>. Returns
+    {panel: [paths]} for the panels found. Read-only."""
+    files = {}
     try:
         with os.scandir(folder) as it:
             for e in it:
@@ -949,11 +960,12 @@ def _live_find_newest_frames(folder):
                 if not n.endswith(LIVE_FRAME_EXT):
                     continue
                 panel = n.rsplit("_", 1)[0]
-                if panel in LIVE_PANELS and (panel not in best or n > best[panel]):
-                    best[panel] = n
+                if panel in LIVE_PANELS:
+                    files.setdefault(panel, []).append(n)
     except OSError:
         return {}
-    return {panel: os.path.join(folder, n) for panel, n in best.items()}
+    return {panel: [os.path.join(folder, n) for n in sorted(names)]
+            for panel, names in files.items()}
 
 
 def _live_find_active_scan_dir(folder):
@@ -1005,12 +1017,6 @@ def _live_maxpool(a, f):
     return pooled
 
 
-def _live_frame_number_from_path(path):
-    """Extract the trailing zero-padded frame number from a Pilatus filename."""
-    m = _LIVE_FRAME_NO_RE.search(os.path.basename(path))
-    return int(m.group(1)) if m else None
-
-
 class LiveImageLoader(QtCore.QThread):
     """Background polling thread that finds the newest frame of every
     detector panel in a watched folder and renders them with hexrdgui's
@@ -1019,7 +1025,8 @@ class LiveImageLoader(QtCore.QThread):
     Folder discovery is the same algorithm as pilatus_live_viewer.py's
     Loader."""
 
-    newImage = QtCore.Signal(object, object, str, float, object)  # image, extent, path, mtime, active
+    newImage = QtCore.Signal(object, object, str, float, object, int)  # image, extent, path, mtime, active, image index
+    scanImages = QtCore.Signal(int, object)  # number of images in the scan, active folder
     status = QtCore.Signal(str)
 
     def __init__(self):
@@ -1035,12 +1042,25 @@ class LiveImageLoader(QtCore.QThread):
         self._active_last_change = 0.0
         self._loaded_key = None
         self._panels: List[str] = []
+        # Show the newest image (follow) or the scan image at `index`.
+        self.follow = True
+        self.index = None
+        # path -> ((mtime, size), number of frames), so each file's header is
+        # read again only when the file changes.
+        self._frame_counts: Dict[str, tuple] = {}
+        self._announced = None
 
     def configure(self, **kw):
         if "folder" in kw and kw["folder"] is not None:
             self.folder = kw["folder"]
             self._active_dir = None
             self._loaded_key = None
+            self._announced = None
+            self.index = None
+        if "follow" in kw and kw["follow"] is not None:
+            self.follow = bool(kw["follow"])
+        if "index" in kw and kw["index"] is not None:
+            self.index = int(kw["index"])
         if "recurse" in kw and kw["recurse"] is not None:
             self.recurse = bool(kw["recurse"])
             self._active_dir = None
@@ -1082,7 +1102,8 @@ class LiveImageLoader(QtCore.QThread):
         now = time.time()
         ad = self._active_dir
         if ad and os.path.isdir(ad):
-            newest = max(_live_find_newest_frames(ad).values(), default=None)
+            newest = max((files[-1] for files in _live_scan_files(ad).values()),
+                         default=None)
             if newest is not None:
                 if newest != self._active_last_path:
                     self._active_last_path = newest
@@ -1093,6 +1114,36 @@ class LiveImageLoader(QtCore.QThread):
         self._active_last_path = None
         self._active_last_change = now
         return self._active_dir
+
+    def _frames_in(self, path):
+        """Number of frames in one file, read again only when the file's
+        mtime or size changes. A file that can't be read yet (still being
+        written) keeps its previous count."""
+        cached = self._frame_counts.get(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return cached[1] if cached else 0
+        sig = (st.st_mtime, st.st_size)
+        if cached and cached[0] == sig:
+            return cached[1]
+        try:
+            n = hexd.count_frames(path, LIVE_HDF5_PATH)
+        except Exception:                               # noqa: BLE001
+            n = cached[1] if cached else 0
+        self._frame_counts[path] = (sig, n)
+        return n
+
+    def _scan_images(self, scan_files):
+        """Every image of the scan as (file position, frame in file). The
+        panels' files are paired by sorted position, and an image counts
+        only once every panel has it."""
+        n_files = min(len(scan_files[p]) for p in self._panels)
+        images = []
+        for i in range(n_files):
+            n = min(self._frames_in(scan_files[p][i]) for p in self._panels)
+            images.extend((i, j) for j in range(n))
+        return images
 
     def run(self):
         while self._running:
@@ -1111,37 +1162,55 @@ class LiveImageLoader(QtCore.QThread):
                 time.sleep(max(0.5, interval))
                 continue
 
-            if self.recurse or not _live_find_newest_frames(folder):
+            if self.recurse or not _live_scan_files(folder):
                 active = self._locate_active(folder)
             else:
                 active = folder
-            found = _live_find_newest_frames(active) if active else {}
-            missing = [p for p in self._panels if p not in found]
+            scan_files = _live_scan_files(active) if active else {}
+            missing = [p for p in self._panels if not scan_files.get(p)]
             if missing:
                 self.status.emit("Searching for %s frames (%s_*%s) under %s ..."
                                  % (", ".join(missing), missing[0], LIVE_FRAME_EXT, folder))
                 time.sleep(max(0.3, interval))
                 continue
-            frames = {p: found[p] for p in self._panels}
+
+            images = self._scan_images(scan_files)
+            if (len(images), active) != self._announced:
+                self._announced = (len(images), active)
+                self.scanImages.emit(len(images), active)
+            if not images:
+                self.status.emit("Waiting for readable frames in %s ..." % active)
+                time.sleep(max(0.3, interval))
+                continue
+            if self.follow or self.index is None:
+                index = len(images) - 1
+            else:
+                index = min(max(self.index, 0), len(images) - 1)
+            i, j = images[index]
+            frames = {p: scan_files[p][i] for p in self._panels}
+
+            key = (tuple(sorted(frames.items())), j)
+            if key == self._loaded_key:
+                time.sleep(interval)
+                continue
+
+            # Only a file's last frame can still be being written.
+            n_in_file = min(self._frames_in(f) for f in frames.values())
+            if j == n_in_file - 1 and not all(_live_size_stable(p) for p in frames.values()):
+                time.sleep(interval)
+                continue
 
             try:
                 mtime = max(os.path.getmtime(p) for p in frames.values())
             except OSError:
                 time.sleep(interval)
                 continue
-            key = (tuple(sorted(frames.items())), mtime)
-            if key == self._loaded_key:
-                time.sleep(interval)
-                continue
 
-            if not all(_live_size_stable(p) for p in frames.values()):
-                time.sleep(interval)
-                continue
-
-            # Don't retry the same files every tick if they fail to render.
+            # Don't retry the same image every tick if it fails to render.
             self._loaded_key = key
             try:
-                hexd.load_detector_files(frames, hdf5_path=LIVE_HDF5_PATH, flips=LIVE_PANELS)
+                hexd.load_detector_files(frames, hdf5_path=LIVE_HDF5_PATH,
+                                         flips=LIVE_PANELS, frame=j)
                 img, extent = hexd.render_cartesian()
             except Exception as exc:                        # noqa: BLE001
                 self.status.emit("Render skipped (%s): %s"
@@ -1149,8 +1218,9 @@ class LiveImageLoader(QtCore.QThread):
                 time.sleep(interval)
                 continue
 
-            path = max(frames.values())
-            self.newImage.emit(np.ma.filled(img, np.nan), extent, path, mtime, active)
+            path = frames[self._panels[0]]
+            self.newImage.emit(np.ma.filled(img, np.nan), extent, path, mtime,
+                               active, index)
             time.sleep(interval)
 
 
@@ -1186,6 +1256,8 @@ class LiveImageTab(QtWidgets.QWidget):
 
         # (left, right, bottom, top) in mm of the current Cartesian image.
         self._extent = None
+        # Number of images in the scan being watched.
+        self._scan_total = 0
 
         # The tab needs hexrdgui and a configured instrument; otherwise
         # _build_ui() shows a message instead of the viewer, and no loader
@@ -1197,6 +1269,7 @@ class LiveImageTab(QtWidgets.QWidget):
         if self._enabled:
             self.loader = LiveImageLoader()
             self.loader.newImage.connect(self.on_new_image)
+            self.loader.scanImages.connect(self.on_scan_images)
             self.loader.status.connect(self._set_status)
             self.loader.start()
 
@@ -1321,6 +1394,26 @@ class LiveImageTab(QtWidgets.QWidget):
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         v.addWidget(self.splitter, 1)
+
+        # Browse the images of the scan being watched. "Follow latest" jumps
+        # to each new image as it arrives; picking an image stops following.
+        browse = QtWidgets.QHBoxLayout()
+        browse.addWidget(QtWidgets.QLabel("Image"))
+        self.image_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.image_slider.setRange(0, 0)
+        self.image_slider.valueChanged.connect(self._on_image_picked)
+        browse.addWidget(self.image_slider, 1)
+        self.image_spin = QtWidgets.QSpinBox()
+        self.image_spin.setRange(1, 1)
+        self.image_spin.valueChanged.connect(lambda n: self._on_image_picked(n - 1))
+        browse.addWidget(self.image_spin)
+        self.image_count_label = QtWidgets.QLabel("of 0")
+        browse.addWidget(self.image_count_label)
+        self.follow_cb = QtWidgets.QCheckBox("Follow latest")
+        self.follow_cb.setChecked(True)
+        self.follow_cb.toggled.connect(lambda on: self.loader.configure(follow=on))
+        browse.addWidget(self.follow_cb)
+        v.addLayout(browse)
 
         # In mm on the Cartesian plane.
         self.roi = pg.RectROI([-50, -50], [100, 100], pen=pg.mkPen("r", width=2))
@@ -1544,21 +1637,54 @@ class LiveImageTab(QtWidgets.QWidget):
         else:
             self.readout.setText("cursor: -")
 
-    def on_new_image(self, data, extent, path, mtime, active_dir):
+    # -- image browsing ---------------------------------------------------------
+    def _on_image_picked(self, index):
+        """The user picked a scan image with the slider or spin box: show
+        that one and stop following new images."""
+        self.loader.configure(index=index)
+        if self.follow_cb.isChecked():
+            self.follow_cb.setChecked(False)
+        self._set_image_controls(index, self._scan_total)
+
+    def _set_image_controls(self, index, total):
+        """Update the slider, spin box and count without triggering
+        _on_image_picked (only user changes should)."""
+        for widget in (self.image_slider, self.image_spin):
+            widget.blockSignals(True)
+        self.image_slider.setRange(0, max(total - 1, 0))
+        self.image_spin.setRange(1, max(total, 1))
+        if index is not None:
+            self.image_slider.setValue(index)
+            self.image_spin.setValue(index + 1)
+        self.image_count_label.setText("of %d" % total)
+        for widget in (self.image_slider, self.image_spin):
+            widget.blockSignals(False)
+
+    def on_scan_images(self, total, active_dir):
+        self._scan_total = total
+        following = self.follow_cb.isChecked()
+        self._set_image_controls(total - 1 if following and total else None, total)
+
+    def on_new_image(self, data, extent, path, mtime, active_dir, index):
         self._raw = data
         self._extent = extent
         self._show(data, reset_range=self._first)
         self._first = False
 
-        frame_no = _live_frame_number_from_path(path)
+        self._set_image_controls(index, self._scan_total)
+
+        # The ROI monitor plots intensity vs image number as new images
+        # arrive; images picked by hand while browsing aren't added.
+        image_no = index + 1
         self._roi_counter += 1
-        new_scan = (active_dir != self._cur_active) or (
-            frame_no is not None and self._roi_x and frame_no < self._roi_x[-1])
-        if new_scan:
-            self._cur_active = active_dir
-            self.reset_roi_history()
-        if self.roi_cb.isChecked():
-            self._update_roi_point(append=True, frame_no=frame_no)
+        if self.follow_cb.isChecked():
+            new_scan = (active_dir != self._cur_active) or (
+                self._roi_x and image_no < self._roi_x[-1])
+            if new_scan:
+                self._cur_active = active_dir
+                self.reset_roi_history()
+            if self.roi_cb.isChecked():
+                self._update_roi_point(append=True, frame_no=image_no)
 
         self._fps_n += 1
         now = time.time()
@@ -1575,9 +1701,10 @@ class LiveImageTab(QtWidgets.QWidget):
         if active_dir and watched and os.path.abspath(active_dir) != os.path.abspath(watched):
             following = "  following: %s" % os.path.basename(active_dir.rstrip("/"))
         self._set_status(
-            "%s   (%d x %d)   max=%d cts   age=%.1fs   %.1f fps%s"
-            % (os.path.basename(path), data.shape[0], data.shape[1], mx,
-               now - mtime, self._last_fps, following))
+            "image %d/%d   %s   (%d x %d)   max=%d cts   age=%.1fs   %.1f fps%s"
+            % (image_no, self._scan_total, os.path.basename(path),
+               data.shape[0], data.shape[1], mx, now - mtime, self._last_fps,
+               following))
 
     def apply_theme(self):
         """Re-skin the ROI plot and the image views' mm axes after a theme
