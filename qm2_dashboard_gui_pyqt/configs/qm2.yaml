@@ -87,16 +87,15 @@ tabs:
       new-status.chess.cornell.edu/ID4B when it can be fetched. Runs
       continuously in the background regardless of which tab is open.
 
-# Live readouts on the Overall Summary tab. Each channel's value comes from
-# the loaded SPEC file's last row (column matched by `spec_patterns`) and,
-# when the "Try live network fetch" box is checked and `pv` is set, from
-# <base_url>/plot/UPDATE_<pv>, which then overrides the SPEC value.
+# Live readouts on the Overall Summary tab. Each channel with a `pv` is
+# subscribed to over EPICS Channel Access (pyepics monitors); its live value
+# overrides the loaded SPEC file's last row (column matched by
+# `spec_patterns`), which is used when the PV has no value. Channel Access
+# search settings can go in an `epics:` section (see configs/id3a.yaml).
 signals:
-  base_url: http://signals.chess.cornell.edu
   # Page whose status text ("Refilling", "Beam Lost", ...) is appended to
   # Slack alerts. null = don't fetch it.
   status_page_url: http://new-status.chess.cornell.edu/ID4B
-  network_fetch_default: true   # initial state of the network-fetch checkbox
 
   # Which channel decides "No Beam" (banner + Slack alerts), and how close
   # to 0 counts as no beam. A placeholder threshold, not a CHESS spec.
@@ -111,9 +110,9 @@ signals:
   #   spec_patterns:  SPEC column names to match, case-insensitive; an exact
   #                   match wins, then a substring match that isn't next to
   #                   another digit (so "ic1" never matches "ic10")
-  #   pv:             signals.chess.cornell.edu PV name, or null for SPEC only
-  #   multiplier:     applied to the raw network value
-  #   range:          [lo, hi] valid RAW network value, or null for no check
+  #   pv:             EPICS PV name, or null for SPEC only
+  #   multiplier:     applied to the raw PV value
+  #   range:          [lo, hi] valid RAW PV value, or null for no check
   channels:
     # CESR's PV was given directly by a user, not taken from a working
     # script, and hasn't been checked; the 1x multiplier and range are

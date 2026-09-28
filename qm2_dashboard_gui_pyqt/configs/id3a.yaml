@@ -77,9 +77,7 @@ tabs:
       Runs in the background regardless of which tab is open.
 
 signals:
-  base_url: http://signals.chess.cornell.edu
   status_page_url: http://new-status.chess.cornell.edu/ID3A
-  network_fetch_default: true
 
   no_beam:
     channel: cesr
@@ -109,6 +107,15 @@ signals:
       range: null
     # Monochromator stabilizer, counter CNT06.
     mostab: {label: MOSTAB, spec_patterns: [mostab], pv: ID3A_CNT06_VLT, multiplier: 1, range: null}
+
+  # EPICS Channel Access settings for pyepics, set inside the dashboard's
+  # own process before it first connects: key k -> environment variable
+  # EPICS_<K>. They override the shell's; beamline shells set
+  # EPICS_CA_ADDR_LIST=127.0.0.1 with EPICS_CA_AUTO_ADDR_LIST=NO, which
+  # finds no ID3A PVs. The CLASSE gateway serves them.
+  epics:
+    ca_addr_list: epics-gw.classe.cornell.edu
+    ca_auto_addr_list: "NO"
 
   # Flux readout under each listed ion chamber's card, from its live
   # voltage, with the CHESS calculator's model (Ion Chamber Flux tab).

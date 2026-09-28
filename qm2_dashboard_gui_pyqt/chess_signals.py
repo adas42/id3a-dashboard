@@ -1,22 +1,22 @@
 """
 chess_signals.py — shared CHESS live-signal helpers.
 
-Meant to be imported by more than one script: the SPEC Dashboard's Summary
-tab (spec_dashboard_qt.py, this package) uses it for its live readout cards,
-and a Slack-bot-style monitor script could import the network half to poll
-signals.chess.cornell.edu directly.
+The SPEC Dashboard's Summary tab (spec_dashboard_qt.py, this package) uses
+this for its live readout cards. Two sources for a channel's value, used
+together:
 
-Two independent ways to get a channel's live value, used together:
+1. EPICS Channel Access (`start_monitors` / `epics_values`) -- each
+   configured PV is subscribed to with pyepics monitors (camonitor-style:
+   the IOC sends every new value), so reading the latest value never makes
+   a network call. The Channel Access search settings come from the
+   beamline config's `signals.epics` section (see spec_dashboard_qt.py).
 
-1. SPEC-file column matching (`match_spec_columns` / `get_spec_live_values`)
-   -- always available offline, reads the latest row of whatever SPEC file
-   is currently loaded. Column names aren't numbered consistently between
-   experiments/SPEC files, so channels are matched by flexible,
-   case-insensitive name patterns rather than fixed column positions.
-
-2. Direct network polling of signals.chess.cornell.edu
-   (`ChessSignalsClient.get_values`) -- opt-in only, since that host is only
-   reachable from on-site/the CHESS network.
+2. SPEC-file column matching (`match_spec_columns` / `get_spec_live_values`)
+   -- reads the latest row of whatever SPEC file is currently loaded; used
+   for channels with no PV, or whose PV has no value. Column names aren't
+   numbered consistently between experiments/SPEC files, so channels are
+   matched by flexible, case-insensitive name patterns rather than fixed
+   column positions.
 
 Which channels exist, and their labels, SPEC column patterns, PV names,
 multipliers and valid ranges, all come from the `signals:` section of the
@@ -28,13 +28,10 @@ QM2/ID4B PV came from and how far it has been verified.
 import re
 from typing import Dict, List, Optional
 
-# Set by configure() from the beamline config's `signals:` section.
-BASE_URL = "http://signals.chess.cornell.edu"
-
 # Status page (e.g. new-status.chess.cornell.edu/ID4B) whose human-readable
 # status message ("Investigating", "Refilling", "Beam Lost", operator notes,
 # ...) is added to Slack alerts by fetch_beam_status_message(). None means
-# the beamline has no such page configured.
+# the beamline has no such page configured. Set by configure().
 NEW_STATUS_URL: Optional[str] = None
 
 # "No beam" detection for the Summary tab's banner: a reading within this
@@ -45,6 +42,11 @@ NO_BEAM_THRESHOLD = 0.5
 # canonical name -> {"label", "spec_patterns", "pv", "multiplier", "range"}
 CHANNELS: Dict[str, Dict] = {}
 _COMPILED_PATTERNS: Dict[str, List["re.Pattern"]] = {}
+
+# EPICS monitors: canonical -> pyepics PV, and the latest raw value each
+# monitor delivered (None until connected, and again after a disconnect).
+_MONITORS: Dict[str, object] = {}
+_LATEST: Dict[str, Optional[float]] = {}
 
 # Regex patterns tried, in order, to pull the current status text out of
 # the status page's HTML. The page's exact markup has not been inspected
@@ -60,10 +62,9 @@ _STATUS_MESSAGE_PATTERNS = [
 
 
 def configure(signals_cfg: Dict) -> None:
-    """Load the endpoints and channel definitions from the beamline config's
-    `signals:` section (see configs/qm2.yaml for the format)."""
-    global BASE_URL, NEW_STATUS_URL, NO_BEAM_THRESHOLD, CHANNELS, _COMPILED_PATTERNS
-    BASE_URL = signals_cfg.get("base_url") or BASE_URL
+    """Load the status page and channel definitions from the beamline
+    config's `signals:` section (see configs/qm2.yaml for the format)."""
+    global NEW_STATUS_URL, NO_BEAM_THRESHOLD, CHANNELS, _COMPILED_PATTERNS
     NEW_STATUS_URL = signals_cfg.get("status_page_url")
     no_beam = signals_cfg.get("no_beam") or {}
     NO_BEAM_THRESHOLD = float(no_beam.get("threshold", NO_BEAM_THRESHOLD))
@@ -231,92 +232,64 @@ def get_spec_live_values(df, columns: List[str]) -> Dict[str, Optional[float]]:
 
 
 # ---------------------------------------------------------------------
-# Direct network polling (opt-in; requires on-site/CHESS network access)
+# EPICS monitors (pyepics)
 # ---------------------------------------------------------------------
 
 
-class ChessSignalsClient:
-    """Thin client for signals.chess.cornell.edu's /plot/UPDATE_{pv}
-    endpoint. Only usable from a machine that can actually reach that host
-    (on-site / the CHESS network) -- every request will simply fail (and
-    get_values() will return None for every channel) from anywhere else.
-    `requests` is imported lazily inside __init__ so the rest of this module
-    (and the dashboard's SPEC-file-based readouts) keep working on a machine
-    where `requests` isn't installed."""
+def start_monitors() -> Optional[str]:
+    """Subscribe to every configured channel's PV with pyepics monitors
+    (camonitor-style: the IOC sends each new value, which a callback keeps
+    in _LATEST). Doesn't block: connections complete in the background.
+    Call after configure() and after the EPICS_CA_* settings are in place.
+    Returns None, or a message if pyepics isn't installed."""
+    try:
+        import epics
+    except ImportError:
+        return "pyepics isn't installed"
+    for canonical, info in CHANNELS.items():
+        if not info["pv"] or canonical in _MONITORS:
+            continue
+        _LATEST[canonical] = None
 
-    def __init__(self, base_url: Optional[str] = None, timeout: float = 5.0, session=None):
-        self.base_url = base_url or BASE_URL
-        self.timeout = timeout
-        if session is not None:
-            self.session = session
-        else:
-            import requests  # lazy import -- see docstring above
+        def on_value(value=None, _canonical=canonical, **_kw):
+            _LATEST[_canonical] = leading_number(value)
 
-            self.session = requests.Session()
-            self.session.headers.update(
-                {
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": f"{self.base_url}/plot",
-                }
-            )
+        def on_connection(conn=None, _canonical=canonical, **_kw):
+            if not conn:
+                _LATEST[_canonical] = None
 
-    def _fetch_last(self, pv_name: str):
-        """GET {base_url}/plot/UPDATE_{pv_name}. The confirmed-working
-        response shape is a JSON array; the live value is the last element.
-        Returns None on any error (non-200, non-JSON, empty array,
-        connection failure, timeout, blocked egress, ...) -- this is
-        expected/normal when called from anywhere off the CHESS network."""
-        url = f"{self.base_url}/plot/UPDATE_{pv_name}"
+        _MONITORS[canonical] = epics.PV(info["pv"], auto_monitor=True,
+                                        callback=on_value,
+                                        connection_callback=on_connection)
+    return None
+
+
+def stop_monitors() -> None:
+    """Unsubscribe from every PV (called when the app closes)."""
+    for pv in _MONITORS.values():
         try:
-            resp = self.session.get(url, timeout=self.timeout)
+            pv.clear_callbacks()
+            pv.disconnect()
         except Exception:
-            return None
-        if resp.status_code != 200:
-            return None
-        try:
-            data = resp.json()
-        except ValueError:
-            return None
-        if isinstance(data, list) and data:
-            return data[-1]
-        return None
+            pass
+    _MONITORS.clear()
+    _LATEST.clear()
 
-    def fetch_raw(self, pv_name: str) -> Optional[float]:
-        """The PV's latest value as a number. Some PVs come back as text
-        with units (ID3A_MON_KEV gives "51.996 keV"); those are read by
-        their leading number. None if unavailable or not numeric."""
-        return leading_number(self._fetch_last(pv_name))
 
-    def fetch_text(self, pv_name: str) -> Optional[str]:
-        """The PV's latest value as text, units included (e.g. "51.996 keV",
-        "nA/V"). None if unavailable."""
-        value = self._fetch_last(pv_name)
-        return None if value is None else str(value).strip()
-
-    def get_values(self, pv_map: Dict[str, Dict]) -> Dict[str, Optional[float]]:
-        """Fetch + validate + scale every channel in pv_map (a dict shaped
-        like CHANNELS). A channel with pv=None is always reported as None
-        without making any request for it. "range" validates the RAW value
-        (before the multiplier); a null range skips the check."""
-        results: Dict[str, Optional[float]] = {}
-        for canonical, info in pv_map.items():
-            pv = info.get("pv")
-            if not pv:
-                results[canonical] = None
-                continue
-            raw = self.fetch_raw(pv)
-            if raw is None:
-                results[canonical] = None
-                continue
-            lo, hi = info.get("range") or (None, None)
-            if lo is not None and hi is not None and not (lo <= raw <= hi):
-                results[canonical] = None
-                continue
-            results[canonical] = raw * info.get("multiplier", 1)
-        return results
+def epics_values() -> Dict[str, Optional[float]]:
+    """The latest monitored value of each subscribed channel, scaled by its
+    multiplier; None if there's no value yet, the PV is disconnected, or
+    the raw value is outside the channel's range. No network call."""
+    values: Dict[str, Optional[float]] = {}
+    for canonical in _MONITORS:
+        info = CHANNELS[canonical]
+        raw = _LATEST.get(canonical)
+        lo, hi = info.get("range") or (None, None)
+        if raw is None or (lo is not None and hi is not None and not lo <= raw <= hi):
+            values[canonical] = None
+        else:
+            values[canonical] = raw * info.get("multiplier", 1)
+    return values
 
 
 # ---------------------------------------------------------------------
@@ -324,32 +297,17 @@ class ChessSignalsClient:
 # ---------------------------------------------------------------------
 
 
-def get_live_values(
-    df=None,
-    columns: Optional[List[str]] = None,
-    use_network: bool = False,
-    client: Optional[ChessSignalsClient] = None,
-) -> Dict[str, Dict]:
-    """Get the live value of every configured channel.
+def get_live_values(df=None, columns: Optional[List[str]] = None) -> Dict[str, Dict]:
+    """Get the live value of every configured channel: the EPICS monitor's
+    value when there is one, otherwise the loaded SPEC file's last row
+    (df/columns, if given). EPICS wins because a loaded SPEC file's last
+    row is a static snapshot that generally never changes again.
 
-    Priority depends on use_network:
-
-    - use_network=False (default): only the SPEC-file column values are
-      used (df/columns, if given).
-
-    - use_network=True: for each channel, a live signals.chess.cornell.edu
-      reading is preferred over the SPEC file's value, falling back to the
-      SPEC-file value only if the network didn't provide one (no PV, or the
-      request failed/is unreachable). Network-first, because a loaded SPEC
-      file's last row is a static snapshot that generally never changes
-      again -- with SPEC-first, turning the network fetch on had no visible
-      effect for any channel the file already had a column for.
-
-    Returns {canonical: {"value": float or None, "source": "spec" or
-    "network" or None, "column": the matched SPEC column name or PV name
-    the value came from, or None}}. "column" lets the caller (e.g. the
-    Summary tab's tooltip) show exactly which column/PV produced a number,
-    so a wrong match is obvious rather than silently wrong.
+    Returns {canonical: {"value": float or None, "source": "epics" or
+    "spec" or None, "column": the PV name or matched SPEC column the value
+    came from, or None}}. "column" lets the caller (e.g. the Summary tab's
+    tooltip) show exactly which PV/column produced a number, so a wrong
+    match is obvious rather than silently wrong.
     """
     result: Dict[str, Dict] = {
         c: {"value": None, "source": None, "column": None} for c in CHANNELS
@@ -361,10 +319,8 @@ def get_live_values(
             if v is not None:
                 result[c] = {"value": v, "source": "spec", "column": col_map.get(c)}
 
-    if use_network:
-        active_client = client or ChessSignalsClient()
-        for c, v in active_client.get_values(CHANNELS).items():
-            if v is not None:
-                result[c] = {"value": v, "source": "network", "column": CHANNELS[c]["pv"]}
+    for c, v in epics_values().items():
+        if v is not None:
+            result[c] = {"value": v, "source": "epics", "column": CHANNELS[c]["pv"]}
 
     return result

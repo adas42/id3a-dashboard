@@ -461,6 +461,14 @@ def _apply_config(cfg: Dict):
     LIVE_PANELS = dict(live.get("panels") or {})
     LIVE_HDF5_PATH = list(live["hdf5_path"]) if live.get("hdf5_path") else None
 
+    # EPICS Channel Access settings for pyepics (signals.epics: key k ->
+    # EPICS_<K>), for this process only; libca reads them when pyepics
+    # first connects, i.e. at the first Refresh.
+    for key, value in (cfg["signals"].get("epics") or {}).items():
+        if isinstance(value, bool):   # an unquoted YAML NO/YES
+            value = "YES" if value else "NO"
+        os.environ["EPICS_" + str(key).upper()] = str(value)
+
     sc.configure(cfg["data_layout"], cfg["spec_parsing"])
     csig.configure(cfg["signals"])
 
@@ -2066,6 +2074,10 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._beam_signals_timer.setInterval(1000)
         self._beam_signals_timer.timeout.connect(self._beam_signals_tick)
 
+        # Subscribe to the live channels' EPICS PVs (pyepics monitors; see
+        # chess_signals.start_monitors). Doesn't block.
+        self._epics_error = csig.start_monitors()
+
         self._build_menu()
         self._build_central()
         self._build_statusbar()
@@ -2358,31 +2370,12 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.signal_labels: Dict[str, List[QtWidgets.QLabel]] = {}
         # channel -> [flux labels] for signals.flux.chambers.
         self.flux_readouts: Dict[str, list] = {}
-        self.beam_network_checkbox = QtWidgets.QCheckBox(
-            "Try live network fetch (on-site/CHESS network only)"
-        )
-        self.beam_network_checkbox.setChecked(
-            bool(CONFIG["signals"].get("network_fetch_default", True))
-        )
-        # Network-first priority: when checked, a channel's live reading
-        # overrides the loaded SPEC file's value rather than just filling
-        # gaps, since the SPEC file's last row is a static snapshot that
-        # generally never changes again (see csig.get_live_values()).
-        self.beam_network_checkbox.setToolTip(
-            "Only finds anything on-site/the CHESS network, so uncheck "
-            "this if you're off-site. When checked, every channel with a "
-            f"PV in the beamline config is read live from {csig.BASE_URL} "
-            "and that live value overrides the loaded SPEC file's value "
-            "(falling back to the SPEC file's value only if the network "
-            "request for that channel fails or is unreachable). Channels "
-            "without a PV always come from the SPEC file."
-        )
 
         # The flux readouts' energy and amplifier gains are read over EPICS
         # only when Refresh is clicked, never polled (see _refresh_flux_inputs).
         has_flux = bool(CONFIG["signals"]["flux"]["chambers"])
         self._flux_inputs = None
-        self._last_signal_values = ({}, False)
+        self._last_signal_values: Dict[str, Dict] = {}
         self.flux_refresh_btn = QtWidgets.QPushButton("Refresh gains && energy")
         self.flux_refresh_btn.setToolTip(
             "Read the X-ray energy and the ion chamber amplifier gains (EPICS "
@@ -2400,7 +2393,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
                 self.flux_gas_combo.setCurrentText(short)
         self.flux_gas_combo.setToolTip("Ion chamber gas for all the flux readouts")
         self.flux_gas_combo.currentTextChanged.connect(
-            lambda _text: self._update_flux_readouts(*self._last_signal_values))
+            lambda _text: self._update_flux_readouts(self._last_signal_values))
 
         groups = CONFIG["summary"]["groups"]
         for i, group in enumerate(groups):
@@ -2413,24 +2406,17 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             if i == 0 and has_flux:
                 row.addWidget(self._make_energy_card())
             row.addStretch(1)
-            if i == 0 and not has_flux:
-                # Governs every channel, not just this group's; it sits at
-                # the end of the first row.
-                row.addWidget(self.beam_network_checkbox)
             layout.addLayout(row)
             if i == 0 and has_flux:
-                # The cards fill the first row, so the flux controls and the
-                # network checkbox get their own line under it.
+                # The cards fill the first row, so the flux controls get
+                # their own line under it.
                 controls = QtWidgets.QHBoxLayout()
                 controls.addWidget(QtWidgets.QLabel("Gas:"))
                 controls.addWidget(self.flux_gas_combo)
                 controls.addWidget(self.flux_refresh_btn)
                 controls.addWidget(self.flux_refresh_label)
                 controls.addStretch(1)
-                controls.addWidget(self.beam_network_checkbox)
                 layout.addLayout(controls)
-        if not groups:
-            layout.addWidget(self.beam_network_checkbox)
 
         # "No Beam" banner -- hidden by default, shown/hidden every second
         # by _beam_signals_tick() based on csig.is_no_beam() of the
@@ -2568,9 +2554,9 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             self.energy_value_lbl.setText(energy_text if energy_ev is not None else "—")
         self.flux_refresh_label.setToolTip("\n".join(problems) if problems else "\n".join(
             "%s: %s" % (canonical, gain[1]) for canonical, gain in gains.items()))
-        self._update_flux_readouts(*self._last_signal_values)
+        self._update_flux_readouts(self._last_signal_values)
 
-    def _update_flux_readouts(self, values: Dict[str, Dict], use_network: bool):
+    def _update_flux_readouts(self, values: Dict[str, Dict]):
         """Fill in the flux under each chamber in signals.flux.chambers from
         its live voltage, with the CHESS calculator's model (see
         ion_chamber_flux.py): counts = volts x counts_per_volt, the energy
@@ -2598,14 +2584,10 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             chamber = flux_cfg["chambers"][canonical]
             missing = list(common_missing)
             info = values.get(canonical) or {}
-            volts = info.get("value") if info.get("source") == "network" else None
+            volts = info.get("value") if info.get("source") == "epics" else None
             if volts is None:
-                if not use_network:
-                    missing.append("the live network fetch (checkbox above)")
-                elif info.get("source") == "spec":
-                    missing.append("the live voltage (a SPEC column is counts, not volts)")
-                else:
-                    missing.append("a live voltage")
+                missing.append("the live EPICS voltage (a SPEC column is counts, not volts)"
+                               if info.get("source") == "spec" else "a live EPICS voltage")
 
             gain = gain_text = None
             if inputs is not None:
@@ -4358,13 +4340,10 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         """Runs every 1s for the whole life of the app. Reads the live value
         of every channel in the config's signals.channels via
         chess_signals.get_live_values() and updates the Summary tab's
-        readout cards. Checks the currently loaded SPEC file's own columns
-        (self.df/self.columns); if the "Try live network fetch" checkbox is
-        checked, also makes a direct network request for every channel
-        with a PV and, for each one, that live network value OVERRIDES the
-        SPEC-file value (network-first), falling back to the SPEC-file
-        value only if the network request for that channel fails/finds
-        nothing. See csig.get_live_values() for why network-first.
+        readout cards: the latest value delivered by the channel's EPICS
+        monitor (pyepics, started in __init__; reading it makes no network
+        call), or the loaded SPEC file's last row (self.df/self.columns)
+        for channels whose PV has no value.
 
         Also toggles the "No Beam" banner: shown whenever the reading of
         the config's signals.no_beam.channel (if any) is near enough to 0
@@ -4373,11 +4352,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         around a small "dark current" baseline. The banner is left hidden
         (not shown as "no beam") when there's no reading at all (None) --
         that's "unknown", not confirmed no-beam."""
-        use_network = bool(
-            getattr(self, "beam_network_checkbox", None)
-            and self.beam_network_checkbox.isChecked()
-        )
-        values = csig.get_live_values(self.df, self.columns, use_network=use_network)
+        values = csig.get_live_values(self.df, self.columns)
         for canonical, labels in getattr(self, "signal_labels", {}).items():
             info = values.get(canonical) or {}
             value = info.get("value")
@@ -4385,9 +4360,13 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             column = info.get("column")
             if value is None:
                 text = "—"
-                tooltip = ("No live value (no matching SPEC column" +
-                           (", network fetch off)" if not use_network
-                            else " and network fetch found nothing)"))
+                pv = csig.CHANNELS[canonical]["pv"]
+                tooltip = ("No value: EPICS PV %s not connected (or no value "
+                           "yet), and no matching SPEC column" % pv if pv
+                           else "No value: no EPICS PV configured, and no "
+                           "matching SPEC column")
+                if self._epics_error:
+                    tooltip += " (%s)" % self._epics_error
             else:
                 text = f"{value:,.2f}"
                 # Names the exact SPEC column (or PV) the number came from,
@@ -4397,13 +4376,13 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
                 if source == "spec":
                     tooltip = f"Source: loaded SPEC file, column \"{column}\""
                 else:
-                    tooltip = f"Source: {csig.BASE_URL} (live network), PV {column}"
+                    tooltip = f"Source: EPICS PV {column} (live)"
             for lbl in labels:
                 lbl.setText(text)
                 lbl.setToolTip(tooltip)
 
-        self._last_signal_values = (values, use_network)
-        self._update_flux_readouts(values, use_network)
+        self._last_signal_values = values
+        self._update_flux_readouts(values)
 
         no_beam_channel = CONFIG["signals"]["no_beam"].get("channel")
         if not no_beam_channel:
@@ -5468,6 +5447,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             self._summary_timer.stop()
         if hasattr(self, "_beam_signals_timer"):
             self._beam_signals_timer.stop()
+        csig.stop_monitors()
         super().closeEvent(event)
 
 

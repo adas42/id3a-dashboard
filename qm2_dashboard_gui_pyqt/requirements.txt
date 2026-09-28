@@ -7,4 +7,4 @@ numpy
 scipy
 reportlab
 Pillow
-requests   # needed for the Summary tab's "Try live network fetch" checkbox AND for Slack Alerts' status-message fetch (new-status.chess.cornell.edu/ID4B)
+requests   # Slack Alerts' status-message fetch (signals.status_page_url, e.g. new-status.chess.cornell.edu/ID3A)
