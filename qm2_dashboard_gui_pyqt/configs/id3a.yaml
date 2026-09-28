@@ -22,7 +22,13 @@ app:
   about_text: >-
     Native Qt (PySide6) GUI for browsing SPEC scan files from CHESS ID3A.
     Read-only — never modifies source data.
-  default_root: "~"                            # TODO(ID3A): ID3A data root
+  default_root: /nfs/chess/raw/current/id3a
+  # btr dropdown next to the Root box: the folders under btr_root whose
+  # names fully match btr_pattern (a regex; name-NNNN-x, e.g.
+  # hedstrom-5112-a). The most recently modified is picked at startup;
+  # picking one points the Root box and file browser at it.
+  btr_root: /nfs/chess/raw/current/id3a
+  btr_pattern: '[A-Za-z][A-Za-z-]*-\d{4}-[A-Za-z]'
   settings_prefix: id3a_dashboard
 
 tabs:

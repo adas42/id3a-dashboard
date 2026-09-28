@@ -2243,6 +2243,25 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         btn_browse = QtWidgets.QPushButton("Browse Folder…")
         btn_browse.clicked.connect(self.set_root_folder)
         top_bar.addWidget(btn_browse)
+        # btr: pick an experiment folder under the beamline's raw-data root
+        # (app.btr_root; folders whose names match app.btr_pattern). The
+        # most recently modified is picked at startup; picking one points
+        # the Root box and file browser at it.
+        self.btr_combo = None
+        btr_root = CONFIG["app"].get("btr_root")
+        if btr_root:
+            top_bar.addWidget(QtWidgets.QLabel("btr:"))
+            self.btr_combo = QtWidgets.QComboBox()
+            self.btr_combo.setToolTip("Experiment (btr) folder under %s" % btr_root)
+            btrs = self._list_btrs(btr_root, CONFIG["app"].get("btr_pattern"))
+            self.btr_combo.addItems([name for name, _mtime in btrs])
+            if btrs:
+                newest = max(btrs, key=lambda b: b[1])[0]
+                self.btr_combo.setCurrentText(newest)
+                self.root_path = self.current_browse_path = os.path.join(btr_root, newest)
+                self.root_edit.setText(self.root_path)
+            self.btr_combo.currentTextChanged.connect(self._on_btr_selected)
+            top_bar.addWidget(self.btr_combo)
         btn_sample = QtWidgets.QPushButton("Load Sample Data")
         btn_sample.clicked.connect(self.load_sample_data)
         top_bar.addWidget(btn_sample)
@@ -2906,6 +2925,35 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.warning(self, "Invalid Path", f"Not a valid directory:\n{path}")
 
+    # A btr folder name: name-NNNN-x, e.g. hedstrom-5112-a (app.btr_pattern
+    # in the config overrides it).
+    _DEFAULT_BTR_PATTERN = r"[A-Za-z][A-Za-z-]*-\d{4}-[A-Za-z]"
+
+    @classmethod
+    def _list_btrs(cls, root: str, pattern: Optional[str]) -> List[tuple]:
+        """Folders directly under `root` whose names fully match `pattern`,
+        as [(name, mtime)] sorted by name. Read-only."""
+        rx = re.compile(pattern or cls._DEFAULT_BTR_PATTERN)
+        btrs = []
+        try:
+            with os.scandir(root) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=True) and rx.fullmatch(entry.name):
+                        btrs.append((entry.name, entry.stat().st_mtime))
+        except OSError:
+            return []
+        return sorted(btrs)
+
+    def _on_btr_selected(self, name: str):
+        """Point the Root box and file browser at the chosen btr folder."""
+        path = os.path.join(CONFIG["app"]["btr_root"], name)
+        if not os.path.isdir(path):
+            return
+        self.root_path = self.current_browse_path = path
+        self.root_edit.setText(path)
+        self._refresh_file_tree()
+        self.status_label.setText(f"btr: {name}")
+
     def _refresh_file_tree(self):
         self.file_tree.clear()
         self._tree_items = {}
@@ -2924,6 +2972,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
         for item in items:
             kind = item.get("type", "other")
+            if kind == "directory":   # sc.list_directory's name for folders
+                kind = "dir"
             if kind == "dir":
                 icon, kind_label = "📁", "dir"
             elif kind == "spec_file":
