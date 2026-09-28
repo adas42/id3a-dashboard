@@ -2603,7 +2603,11 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             chamber = flux_cfg["chambers"][canonical]
             missing = list(common_missing)
             info = values.get(canonical) or {}
-            volts = info.get("value") if info.get("source") == "epics" else None
+            # The card's value carries the channel's multiplier (QM2's ICs are
+            # x10000); the flux model needs the PV's raw volts.
+            volts = None
+            if info.get("source") == "epics":
+                volts = info["value"] / (csig.CHANNELS[canonical].get("multiplier") or 1)
             if volts is None:
                 missing.append("the live EPICS voltage (a SPEC column is counts, not volts)"
                                if info.get("source") == "spec" else "a live EPICS voltage")

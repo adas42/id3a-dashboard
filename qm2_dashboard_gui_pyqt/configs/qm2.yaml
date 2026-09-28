@@ -180,6 +180,24 @@ signals:
       multiplier: 1
       range: [50, 400]
 
+  # Flux readout under each listed ion chamber's card, from its live PV
+  # voltage (raw volts; the card's x10000 multiplier is taken back out),
+  # with the CHESS calculator's model (Ion Chamber Flux tab). One gas for
+  # all chambers, picked on the Summary tab; `gas` is the default. The
+  # energy and amplifier PVs are read over EPICS only when the Summary
+  # tab's Refresh button is clicked.
+  flux:
+    energy_pv: ID4B_MON_KEV            # a string PV, e.g. "45.000 keV"
+    counts_per_volt: 100000            # counts = volts x this
+    gas: Nitrogen
+    chambers:
+      # SR570 amplifiers, read as the IOC's state names (e.g. "20" and
+      # "nA/V"). AMP01 and AMP02 are swapped: IC1 is on AMP02, IC2 on AMP01.
+      ic1: {length_cm: 6, gain_pv: "ID4B_AMP02:sens_num.VAL", gain_units_pv: "ID4B_AMP02:sens_unit.VAL"}
+      ic2: {length_cm: 6, gain_pv: "ID4B_AMP01:sens_num.VAL", gain_units_pv: "ID4B_AMP01:sens_unit.VAL"}
+      # The diode (AMP03) has no flux readout: the ion chamber model
+      # doesn't apply to a photodiode.
+
 # Rows of readout cards on the Overall Summary tab, top to bottom. Each lists
 # channels from signals.channels. A group with no channels still shows its
 # title.
