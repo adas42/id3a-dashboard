@@ -91,11 +91,20 @@ tabs:
 # subscribed to over EPICS Channel Access (pyepics monitors); its live value
 # overrides the loaded SPEC file's last row (column matched by
 # `spec_patterns`), which is used when the PV has no value. Channel Access
-# search settings can go in an `epics:` section (see configs/id3a.yaml).
+# search settings are in the `epics:` section below.
 signals:
   # Page whose status text ("Refilling", "Beam Lost", ...) is appended to
   # Slack alerts. null = don't fetch it.
   status_page_url: http://new-status.chess.cornell.edu/ID4B
+
+  # EPICS Channel Access settings for pyepics, set inside the dashboard's
+  # own process before it first connects: key k -> environment variable
+  # EPICS_<K>. They override the shell's; beamline shells set
+  # EPICS_CA_ADDR_LIST=127.0.0.1 with EPICS_CA_AUTO_ADDR_LIST=NO, which
+  # finds no PVs. The CLASSE gateway serves the ID4B and CESR PVs.
+  epics:
+    ca_addr_list: epics-gw.classe.cornell.edu
+    ca_auto_addr_list: "NO"
 
   # Which channel decides "No Beam" (banner + Slack alerts), and how close
   # to 0 counts as no beam. A placeholder threshold, not a CHESS spec.
@@ -114,13 +123,12 @@ signals:
   #   multiplier:     applied to the raw PV value
   #   range:          [lo, hi] valid RAW PV value, or null for no check
   channels:
-    # CESR's PV was given directly by a user, not taken from a working
-    # script, and hasn't been checked; the 1x multiplier and range are
-    # placeholders. Compare with new-status.chess.cornell.edu/ID4B on site.
+    # CESR ring current in mA (as in configs/id3a.yaml). Was ID4B_CNT01_VLT,
+    # which read 1.42 on 2026-09-28 while the ring was at ~142 mA.
     cesr:
       label: CESR
       spec_patterns: [cesr]
-      pv: ID4B_CNT01_VLT
+      pv: CESR_BR_POSI_A
       multiplier: 1
       range: [-10, 1000]
     # IC1/IC2/diode PVs and the x10000 multiplier come from the
