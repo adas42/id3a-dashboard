@@ -62,6 +62,7 @@ import beamline_config as bcfg
 import spec_core as sc
 import chess_signals as csig
 import ion_chamber_flux as icf
+import map_queue_tab as mqt
 
 # hexrdgui is only needed for the Live Image tab, which renders detector
 # frames with hexrdgui's Cartesian view (hexrd_display.py). It takes seconds
@@ -2326,6 +2327,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._build_summary_tab()
         self._build_slack_alerts_tab()
         self._build_ion_flux_tab()
+        self._build_map_queue_tab()
         self._build_export_tab()
 
         # Re-order the tabs on-screen to match the config's `tabs:` list,
@@ -2744,6 +2746,22 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         ("current", "Current (A)"),
         ("flux", "Flux (ph/s)"),
     )
+
+    def _build_map_queue_tab(self):
+        """"Map Queue" tab: the mapqueue runner's queue (map_queue_tab.py),
+        through the runner's local HTTP API. Needs the beamline YAML's
+        `map_queue` section (url, client_path)."""
+        cfg = CONFIG.get("map_queue") or {}
+        if cfg.get("url"):
+            widget = mqt.MapQueueTab(cfg["url"], cfg.get("client_path"),
+                                     float(cfg.get("poll_s", 1.0)))
+        else:
+            widget = QtWidgets.QLabel(
+                "The Map Queue tab isn't configured: add a map_queue section "
+                "(url, client_path) to the beamline YAML.")
+            widget.setWordWrap(True)
+            widget.setAlignment(QtCore.Qt.AlignCenter)
+        self._add_tab("map_queue", widget)
 
     def _build_ion_flux_tab(self):
         """"Ion Chamber Flux" tab: X-ray flux from ion chamber counts, a

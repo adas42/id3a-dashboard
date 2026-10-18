@@ -78,6 +78,8 @@ tabs:
     description: >-
       X-ray flux from ion chamber counts (gas, chamber length, energy,
       counter range), ported from the CHESS web calculator.
+  - key: map_queue          # ID3A's mapqueue runner; not used at QM2
+    show: false
   - key: slack_alerts
     label: Slack Alerts
     description: >-

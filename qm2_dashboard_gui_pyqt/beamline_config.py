@@ -29,6 +29,7 @@ TAB_LABELS: Dict[str, str] = {
     "motor_positions": "Motor Positions",
     "export": "Export",
     "ion_flux": "Ion Chamber Flux",
+    "map_queue": "Map Queue",
     "slack_alerts": "Slack Alerts",
 }
 
