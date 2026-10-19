@@ -464,7 +464,7 @@ class MapQueueTab(QtWidgets.QWidget):
         self._status = status
         state = status.get("state", "connecting…")
         if status.get("paused"):
-            state += " (paused)"
+            state += f" (paused: {status.get('pause_reason') or 'paused'})"
         self.state_label.setText(state)
         if status:
             self.where_label.setText(
