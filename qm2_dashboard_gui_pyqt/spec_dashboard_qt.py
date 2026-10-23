@@ -2211,6 +2211,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             panel.apply_theme()
         if hasattr(self, "live_image_tab"):
             self.live_image_tab.apply_theme()
+        if hasattr(self, "map_queue_tab"):
+            self.map_queue_tab.apply_theme(THEMES[name])
 
         # Re-render whatever is currently on screen so colors that depend on
         # theme (fit overlay, reference/ghost overlays, residuals, plotted
@@ -2754,7 +2756,9 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         cfg = CONFIG.get("map_queue") or {}
         if cfg.get("url"):
             widget = mqt.MapQueueTab(cfg["url"], cfg.get("client_path"),
-                                     float(cfg.get("poll_s", 1.0)))
+                                     float(cfg.get("poll_s", 1.0)),
+                                     theme=THEMES[self.current_theme])
+            self.map_queue_tab = widget
         else:
             widget = QtWidgets.QLabel(
                 "The Map Queue tab isn't configured: add a map_queue section "
