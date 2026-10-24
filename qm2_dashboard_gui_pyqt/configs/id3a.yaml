@@ -88,9 +88,15 @@ tabs:
       Runs in the background regardless of which tab is open.
 
 map_queue:                  # the mapqueue runner (Map Queue tab)
+  # Leave url out to show only the stage map: then nothing in the tab
+  # can queue points or steer the runner.
   url: http://127.0.0.1:8765          # its local API (the runner's api: section)
   client_path: /nfs/chess/user/ad785/codes/mapqueue   # checkout with mapqueue/client.py
   poll_s: 1.0                         # seconds between status polls
+  # The read-only stage service (python -m mapqueue.stage; its stage:
+  # section): the beam position and trail on the stage map.
+  stage_url: http://127.0.0.1:8766
+  trail_s: 120                        # seconds of trail shown
 
 signals:
   status_page_url: http://new-status.chess.cornell.edu/ID3A

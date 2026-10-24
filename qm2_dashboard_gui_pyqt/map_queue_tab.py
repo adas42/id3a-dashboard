@@ -8,9 +8,14 @@ thing that changes the queue: a drag-and-drop or a button asks it to,
 and the table shows the result on the next fetch.
 
 Besides the table: a status banner (state, progress, the spec command
-running now, a rough time left), a map of one sample's points in the
-x-z plane with the stage limits and the beam position, a timeline of
-every attempt, and a readable view of the selected point.
+running now, a rough time left), a timeline of every attempt, a
+readable view of the selected point, and the stage map (stage_map.py:
+the beam's position and trail from the read-only stage service, with
+the queue's points on top). The map and the timeline are dock panels
+that float out into their own windows.
+
+Without a runner URL (map_queue.url) the tab is the stage map alone:
+nothing in it can queue points or steer the runner.
 """
 
 import html
@@ -26,6 +31,8 @@ from typing import Dict, List, Optional
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg  # after PySide6, so it binds to PySide6
 
+from stage_map import DEFAULT_THEME, StageMap, status_colors, style_plot
+
 # Points that can be moved or removed; the runner refuses the others.
 EDITABLE = ("pending", "blocked")
 STATUSES = ("pending", "blocked", "running", "done", "failed")
@@ -35,15 +42,6 @@ COLUMNS = [
     ("attempts", "Attempts"), ("scan_n", "Scan #"), ("problems", "Problems"),
 ]
 MIME_TYPE = "application/x-mapqueue-ids"
-
-# The dashboard's dark palette (spec_dashboard_qt.THEMES["dark"]), used
-# until the dashboard passes the active one (MapQueueTab.apply_theme).
-DEFAULT_THEME = {
-    "BG_PANEL": "#242534", "BORDER": "#3d3f57", "TEXT_PRIMARY": "#e8e8f2",
-    "TEXT_SECONDARY": "#a0a3ba", "ACCENT": "#5ec8f8",
-    "PRESSED_TEXT": "#0a0a0f",
-    "PLOT_COLORS": ["#5ec8f8", "#ffb74d", "#81c995", "#f28b82", "#c58af9"],
-}
 
 # The runner's state -> the status color it's shown in.
 STATE_COLORS = {
@@ -56,14 +54,6 @@ STATE_COLORS = {
 # Seconds per point besides counting (moves, slits, file writing), until
 # a point is done and the real overhead is known.
 DEFAULT_OVERHEAD_S = 15.0
-
-
-def status_colors(theme: Dict) -> Dict[str, str]:
-    """One color per point status and attempt outcome, from the theme."""
-    plot = theme["PLOT_COLORS"]
-    return {"pending": theme["TEXT_SECONDARY"], "running": theme["ACCENT"],
-            "done": plot[2], "blocked": plot[1], "aborted": plot[1],
-            "failed": plot[3]}
 
 
 # ----------------------------------------------------------------------
@@ -170,70 +160,6 @@ def fmt_duration(seconds: float) -> str:
     if minutes < 60:
         return f"{minutes} min"
     return f"{minutes // 60} h {minutes % 60:02d} min"
-
-
-def point_xz(params: Dict):
-    """A point on the map: (x, z). The beam's width is along x and its
-    height along z. An axis the stack doesn't have (left out) is 0."""
-    position = params.get("position") or {}
-    return position.get("x", 0.0), position.get("z", 0.0)
-
-
-def scan_extent(params: Dict):
-    """(x0, x1, z0, z1): what the beam covers for a point, i.e. the beam
-    size stretched over the fly (and step) range on x or z."""
-    centre = dict(zip(("x", "z"), point_xz(params)))
-    beam = params.get("beam") or {}
-    half = {"x": beam.get("width", 0.0) / 2, "z": beam.get("height", 0.0) / 2}
-    low = {a: centre[a] - half[a] for a in centre}
-    high = {a: centre[a] + half[a] for a in centre}
-    for name in ("fly", "step"):
-        group = params.get(name)
-        if isinstance(group, dict) and group.get("axis") in centre:
-            axis = group["axis"]
-            ends = sorted((centre[axis] + group["start"],
-                           centre[axis] + group["end"]))
-            low[axis], high[axis] = ends[0] - half[axis], ends[1] + half[axis]
-    return low["x"], high["x"], low["z"], high["z"]
-
-
-def fly_segment(params: Dict):
-    """The fly line ((x0, z0), (x1, z1)), if the point flies along x or z."""
-    fly = params.get("fly")
-    if not isinstance(fly, dict) or fly.get("axis") not in ("x", "z"):
-        return None
-    x, z = point_xz(params)
-    if fly["axis"] == "x":
-        return (x + fly["start"], z), (x + fly["end"], z)
-    return (x, z + fly["start"]), (x, z + fly["end"])
-
-
-def beam_on_map(stage: Dict):
-    """Where the beam is on the map now, (x, z), from the motor positions:
-    XM plus XF when XF is a separate fly-only stage (homed at 0), and Z
-    plus ZF likewise. None while a position isn't known."""
-    roles, positions = stage.get("roles") or {}, stage.get("positions") or {}
-    coords = []
-    for position_role, fly_role in (("XM", "XF"), ("Z", "ZF")):
-        mne, fly = roles.get(position_role), roles.get(fly_role)
-        value = 0.0
-        for motor in ((mne,) if fly in (None, "none", mne) else (mne, fly)):
-            if motor in (None, "none"):
-                continue
-            if motor not in positions or positions[motor] is None:
-                return None
-            value += positions[motor]
-        coords.append(value)
-    return tuple(coords)
-
-
-def stage_frame(stage: Dict):
-    """(x0, x1, z0, z1): the XM and Z user limits, or None if unknown."""
-    roles, limits = stage.get("roles") or {}, stage.get("limits") or {}
-    x, z = limits.get(roles.get("XM")), limits.get(roles.get("Z"))
-    if not x or not z:
-        return None
-    return x[0], x[1], z[0], z[1]
 
 
 def attempt_bars(items: List[Dict], now: float):
@@ -631,219 +557,8 @@ class StatusBanner(QtWidgets.QFrame):
 
 
 # ----------------------------------------------------------------------
-# Map and timeline
+# Timeline (the map is stage_map.StageMap)
 # ----------------------------------------------------------------------
-def _style_plot(plot: pg.PlotWidget, theme: Dict):
-    plot.setBackground(theme["BG_PANEL"])
-    for name in ("bottom", "left"):
-        axis = plot.getAxis(name)
-        axis.setPen(pg.mkPen(theme["TEXT_SECONDARY"]))
-        axis.setTextPen(pg.mkPen(theme["TEXT_PRIMARY"]))
-
-
-class PointMap(QtWidgets.QWidget):
-    """One sample's points in the x-z plane: markers colored by status,
-    fly ranges as lines, the selected point's beam footprint, the XM/Z
-    limits as a dashed frame, and the beam's position now as a cross."""
-
-    pointClicked = QtCore.Signal(str)
-    FOLLOW = "current sample"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        top = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Map")
-        title.setStyleSheet("font-weight: bold")
-        top.addWidget(title)
-        self.sample = QtWidgets.QComboBox()
-        self.sample.addItem(self.FOLLOW)
-        self.sample.currentTextChanged.connect(lambda _: self._redraw(fit=True))
-        top.addWidget(self.sample)
-        self.legend = QtWidgets.QLabel("")
-        self.legend.setProperty("secondaryText", True)
-        top.addWidget(self.legend, 1)
-        fit = QtWidgets.QPushButton("Fit")
-        fit.setToolTip("Zoom to this sample's points")
-        fit.clicked.connect(lambda: self._redraw(fit=True))
-        top.addWidget(fit)
-        layout.addLayout(top)
-
-        self.plot = pg.PlotWidget()
-        self.plot.setAspectLocked(True)
-        self.plot.showGrid(x=True, y=True, alpha=0.15)
-        self.plot.setLabel("bottom", "x (mm)")
-        self.plot.setLabel("left", "z (mm)")
-        layout.addWidget(self.plot, 1)
-        self.frame = pg.PlotDataItem()
-        self.plot.addItem(self.frame, ignoreBounds=True)
-        self.lines = pg.PlotDataItem(connect="pairs")
-        self.plot.addItem(self.lines)
-        self.points = pg.ScatterPlotItem(hoverable=True, tip=self._tip)
-        self.points.sigClicked.connect(self._clicked)
-        self.plot.addItem(self.points)
-        self.footprint = QtWidgets.QGraphicsRectItem()
-        self.footprint.setVisible(False)
-        self.plot.addItem(self.footprint)
-        # A ring around the selected point: a footprint can be too small to
-        # see at map scale (a 0.1 x 0.05 mm tseries).
-        self.ring = pg.ScatterPlotItem(size=24, brush=pg.mkBrush(None))
-        self.plot.addItem(self.ring)
-        self.beam = pg.ScatterPlotItem(symbol="+", size=26)
-        self.plot.addItem(self.beam)
-
-        self._theme = DEFAULT_THEME
-        self._items: Dict[str, Dict] = {}
-        self._order: List[str] = []
-        self._stage: Dict = {}
-        self._current_sample: Optional[str] = None
-        self._selected: Optional[str] = None
-        self._shown_sample: Optional[str] = None
-
-    # Inputs
-
-    def set_theme(self, theme: Dict):
-        self._theme = theme
-        _style_plot(self.plot, theme)
-        self._redraw()
-
-    def set_items(self, items: List[Dict]):
-        self._items = {item["id"]: item for item in items}
-        self._order = [item["id"] for item in items]
-        samples = sorted({(item.get("params") or {}).get("sample")
-                          for item in items} - {None})
-        chosen = self.sample.currentText()
-        self.sample.blockSignals(True)
-        self.sample.clear()
-        self.sample.addItems([self.FOLLOW] + samples)
-        self.sample.setCurrentText(chosen if chosen in samples else self.FOLLOW)
-        self.sample.blockSignals(False)
-        self._redraw()
-
-    def set_stage(self, stage: Dict, current_sample: Optional[str]):
-        self._stage = stage or {}
-        changed = current_sample != self._current_sample
-        self._current_sample = current_sample
-        if changed:
-            self._redraw(fit=True)
-        else:
-            self._draw_stage()
-
-    def set_selected(self, item_id: Optional[str]):
-        self._selected = item_id
-        self._draw_footprint()
-
-    # Drawing
-
-    def _sample(self) -> Optional[str]:
-        chosen = self.sample.currentText()
-        return self._current_sample if chosen == self.FOLLOW else chosen
-
-    def _redraw(self, fit=False):
-        theme, colors = self._theme, status_colors(self._theme)
-        sample = self._sample()
-        shown = [self._items[i] for i in self._order
-                 if (self._items[i].get("params") or {}).get("sample") == sample]
-        spots, segments = [], []
-        for item in shown:
-            params = item.get("params") or {}
-            color = colors.get(item["status"], theme["TEXT_PRIMARY"])
-            running = item["status"] == "running"
-            hollow = item["status"] == "pending"
-            spots.append({
-                "pos": point_xz(params), "data": item["id"],
-                "size": 15 if running else 9,
-                "pen": pg.mkPen(color, width=2 if hollow or running else 1),
-                "brush": (pg.mkBrush(None) if hollow else pg.mkBrush(color)),
-            })
-            segment = fly_segment(params)
-            if segment:
-                segments.extend(segment)
-        self.points.setData(spots)
-        if segments:
-            self.lines.setData([p[0] for p in segments], [p[1] for p in segments],
-                               connect="pairs",
-                               pen=pg.mkPen(theme["TEXT_SECONDARY"], width=1))
-        else:
-            self.lines.setData([], [])
-        counts = {}
-        for item in shown:
-            counts[item["status"]] = counts.get(item["status"], 0) + 1
-        self.legend.setText("   " + "  ".join(
-            f"<span style='color:{colors.get(s, theme['TEXT_PRIMARY'])}'>●</span>"
-            f" {n} {s}" for s, n in sorted(counts.items())))
-        self.legend.setTextFormat(QtCore.Qt.RichText)
-        self._draw_stage()
-        self._draw_footprint()
-        if fit or sample != self._shown_sample:
-            self._shown_sample = sample
-            if shown:
-                self.plot.getViewBox().autoRange(
-                    items=[self.points, self.lines], padding=0.15)
-
-    def _draw_stage(self):
-        theme = self._theme
-        frame = stage_frame(self._stage)
-        if frame:
-            x0, x1, z0, z1 = frame
-            self.frame.setData([x0, x1, x1, x0, x0], [z0, z0, z1, z1, z0],
-                               pen=pg.mkPen(theme["TEXT_SECONDARY"], width=1,
-                                            style=QtCore.Qt.DashLine))
-        else:
-            self.frame.setData([], [])
-        beam = beam_on_map(self._stage)
-        if beam is not None:
-            self.beam.setData([beam[0]], [beam[1]],
-                              pen=pg.mkPen(theme["ACCENT"], width=2),
-                              brush=pg.mkBrush(theme["ACCENT"]))
-            names = [self._stage.get("roles", {}).get(r) for r in ("XM", "Z")]
-            self.beam.setToolTip(f"beam now: x {beam[0]:.4g}, z {beam[1]:.4g} "
-                                 f"({', '.join(n for n in names if n)})")
-        else:
-            self.beam.setData([], [])
-        roles = self._stage.get("roles") or {}
-        for axis, role in (("bottom", "XM"), ("left", "Z")):
-            mne = roles.get(role)
-            label = "x" if axis == "bottom" else "z"
-            self.plot.setLabel(axis, f"{label} (mm)" + (f"  [{mne}]" if mne
-                                                         and mne != "none"
-                                                         else ""))
-
-    def _draw_footprint(self):
-        item = self._items.get(self._selected) if self._selected else None
-        params = (item or {}).get("params") or {}
-        if not item or params.get("sample") != self._sample():
-            self.footprint.setVisible(False)
-            self.ring.setData([], [])
-            return
-        x, z = point_xz(params)
-        self.ring.setData([x], [z], pen=pg.mkPen(self._theme["ACCENT"], width=2))
-        x0, x1, z0, z1 = scan_extent(params)
-        self.footprint.setRect(QtCore.QRectF(x0, z0, x1 - x0, z1 - z0))
-        fill = QtGui.QColor(self._theme["ACCENT"])
-        fill.setAlpha(50)
-        self.footprint.setPen(pg.mkPen(self._theme["ACCENT"], width=2))
-        self.footprint.setBrush(pg.mkBrush(fill))
-        self.footprint.setVisible(True)
-
-    # Mouse
-
-    def _tip(self, x, y, data):
-        item = self._items.get(data) or {}
-        params = item.get("params") or {}
-        fly = params.get("fly")
-        scan = params.get("scan", "")
-        if isinstance(fly, dict):
-            scan += f" {fly['axis']} {fly['start']:+g}..{fly['end']:+g}"
-        return (f"{data}  {item.get('status')}\n{scan}\n"
-                f"x {x:.4g}, z {y:.4g}, dataset {params.get('dataset_id')}")
-
-    def _clicked(self, _item, points, *_):
-        if len(points):
-            self.pointClicked.emit(points[0].data())
-
-
 class AttemptTimeline(QtWidgets.QWidget):
     """Every attempt as a bar on a time axis, one lane per sample, colored
     by outcome; the running attempt grows until it ends."""
@@ -855,9 +570,6 @@ class AttemptTimeline(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         top = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Timeline")
-        title.setStyleSheet("font-weight: bold")
-        top.addWidget(title)
         self.legend = QtWidgets.QLabel("")
         self.legend.setTextFormat(QtCore.Qt.RichText)
         self.legend.setProperty("secondaryText", True)
@@ -881,7 +593,7 @@ class AttemptTimeline(QtWidgets.QWidget):
 
     def set_theme(self, theme: Dict):
         self._theme = theme
-        _style_plot(self.plot, theme)
+        style_plot(self.plot, theme)
 
     def refresh(self, items: List[Dict], now: float):
         colors = status_colors(self._theme)
@@ -1016,14 +728,23 @@ class ImportDialog(QtWidgets.QDialog):
 # ----------------------------------------------------------------------
 class MapQueueTab(QtWidgets.QWidget):
 
-    def __init__(self, url: str, client_path: Optional[str] = None,
+    def __init__(self, url: Optional[str], client_path: Optional[str] = None,
                  poll_s: float = 1.0, theme: Optional[Dict] = None,
+                 stage_url: Optional[str] = None, trail_s: float = 120.0,
                  parent=None):
         super().__init__(parent)
         self.url = url
         self._status: Dict = {}
         self._theme = theme or DEFAULT_THEME
+        self.worker = None
         outer = QtWidgets.QVBoxLayout(self)
+        self.map = StageMap(stage_url, trail_s, theme=self._theme)
+        self.map.pointClicked.connect(self._select_point)
+        if not url:
+            # The stage map alone: no runner, so nothing here can queue
+            # points or steer anything.
+            outer.addWidget(self.map, 1)
+            return
         try:
             if client_path and client_path not in sys.path:
                 sys.path.insert(0, client_path)
@@ -1035,8 +756,7 @@ class MapQueueTab(QtWidgets.QWidget):
                 "Check map_queue.client_path in the beamline YAML.")
             message.setWordWrap(True)
             outer.addWidget(message)
-            outer.addStretch(1)
-            self.worker = None
+            outer.addWidget(self.map, 1)
             return
         self._col11_choices = COL11_CHOICES
         self._build(outer)
@@ -1089,8 +809,8 @@ class MapQueueTab(QtWidgets.QWidget):
         interrupted.addWidget(self.restart_btn)
         outer.addLayout(interrupted)
 
-        # Left: filters, the table and the selected point. Right: the map
-        # above the timeline.
+        # Left: filters, the table and the selected point. Right: dock
+        # panels for the stage map and the timeline.
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -1155,20 +875,31 @@ class MapQueueTab(QtWidgets.QWidget):
         left_split.setSizes([480, 260])
         left_layout.addWidget(left_split, 1)
 
-        right_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self.map = PointMap()
-        self.map.pointClicked.connect(self._select_point)
-        right_split.addWidget(self.map)
+        # Drag a panel's title bar to float it out into its own window;
+        # double-click the title to dock it back. They can't be closed.
+        inner = QtWidgets.QMainWindow()
+        inner.setWindowFlags(QtCore.Qt.Widget)
+        inner.setDockOptions(QtWidgets.QMainWindow.AnimatedDocks
+                             | QtWidgets.QMainWindow.AllowNestedDocks)
+        inner.setCentralWidget(left)
         self.timeline = AttemptTimeline()
         self.timeline.pointClicked.connect(self._select_point)
-        right_split.addWidget(self.timeline)
-        right_split.setSizes([520, 220])
-
-        main = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        main.addWidget(left)
-        main.addWidget(right_split)
-        main.setSizes([800, 600])
-        outer.addWidget(main, 1)
+        self.docks = {}
+        for name, widget in (("Stage map", self.map),
+                             ("Timeline", self.timeline)):
+            dock = QtWidgets.QDockWidget(name, inner)
+            dock.setObjectName("mapQueue" + name.replace(" ", ""))
+            dock.setWidget(widget)
+            dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable
+                             | QtWidgets.QDockWidget.DockWidgetFloatable)
+            inner.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+            self.docks[name] = dock
+        inner.splitDockWidget(self.docks["Stage map"], self.docks["Timeline"],
+                              QtCore.Qt.Vertical)
+        inner.resizeDocks([self.docks["Stage map"]], [620], QtCore.Qt.Horizontal)
+        inner.resizeDocks([self.docks["Stage map"], self.docks["Timeline"]],
+                          [520, 220], QtCore.Qt.Vertical)
+        outer.addWidget(inner, 1)
 
         buttons = QtWidgets.QHBoxLayout()
         import_btn = QtWidgets.QPushButton("Import old file…")
@@ -1192,11 +923,11 @@ class MapQueueTab(QtWidgets.QWidget):
     def apply_theme(self, theme: Dict):
         """Re-color everything after the dashboard switches themes."""
         self._theme = theme
-        if not hasattr(self, "banner"):
+        self.map.set_theme(theme)
+        if not hasattr(self, "banner"):  # the stage map alone
             return
         self.banner.set_theme(theme)
         self.model.set_colors(status_colors(theme))
-        self.map.set_theme(theme)
         self.timeline.set_theme(theme)
         self._on_status(self._status)
         self.timeline.refresh(self.model.all_items(), time.time())
@@ -1212,8 +943,7 @@ class MapQueueTab(QtWidgets.QWidget):
             self.banner.set_state("connecting…")
         else:
             self.connection_label.setText(self.url)
-            self.map.set_stage(status.get("stage") or {},
-                               status.get("current_sample"))
+            self.map.set_current_sample(status.get("current_sample"))
             if status.get("running"):
                 self.timeline.refresh(self.model.all_items(), now)
         counts = status.get("counts") or {}
@@ -1252,6 +982,7 @@ class MapQueueTab(QtWidgets.QWidget):
         self.connection_label.setText(f"{self.url}: {error}")
         self._on_status({})
         self.banner.set_state("runner not reachable")
+        self.map.set_items([])  # the stage stays; the queue's points go
 
     def _on_action_done(self, what: str, result):
         if what == "import":
@@ -1397,3 +1128,4 @@ class MapQueueTab(QtWidgets.QWidget):
         if self.worker is not None:
             self.worker.stop()
             self.worker.wait(3000)
+        self.map.shutdown()

@@ -2751,18 +2751,23 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
 
     def _build_map_queue_tab(self):
         """"Map Queue" tab: the mapqueue runner's queue (map_queue_tab.py),
-        through the runner's local HTTP API. Needs the beamline YAML's
-        `map_queue` section (url, client_path)."""
+        through the runner's local HTTP API, and the stage map
+        (stage_map.py) from the read-only stage service. Needs the
+        beamline YAML's `map_queue` section: url and client_path for the
+        queue, stage_url for the map; with stage_url alone it's the map
+        alone."""
         cfg = CONFIG.get("map_queue") or {}
-        if cfg.get("url"):
-            widget = mqt.MapQueueTab(cfg["url"], cfg.get("client_path"),
+        if cfg.get("url") or cfg.get("stage_url"):
+            widget = mqt.MapQueueTab(cfg.get("url"), cfg.get("client_path"),
                                      float(cfg.get("poll_s", 1.0)),
-                                     theme=THEMES[self.current_theme])
+                                     theme=THEMES[self.current_theme],
+                                     stage_url=cfg.get("stage_url"),
+                                     trail_s=float(cfg.get("trail_s", 120)))
             self.map_queue_tab = widget
         else:
             widget = QtWidgets.QLabel(
                 "The Map Queue tab isn't configured: add a map_queue section "
-                "(url, client_path) to the beamline YAML.")
+                "(url and client_path, and/or stage_url) to the beamline YAML.")
             widget.setWordWrap(True)
             widget.setAlignment(QtCore.Qt.AlignCenter)
         self._add_tab("map_queue", widget)
