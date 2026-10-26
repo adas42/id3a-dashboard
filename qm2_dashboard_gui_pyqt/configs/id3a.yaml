@@ -20,12 +20,12 @@ app:
     works with any standard SPEC-format file. It never modifies your
     experiment data. Three tools act, and only when you click: Map Queue
     sends points to the queue runner, Array Generation writes array files
-    into a sample's aux folder, and Sample JSONs writes the starter
+    into a sample's aux folder, and FOXDEN JSONs writes the starter
     sample-metadata JSONs into a btr's metadata folder.
   about_text: >-
     Native Qt (PySide6) GUI for browsing SPEC scan files from CHESS ID3A.
     Never modifies source data. Map Queue (queue points), Array Generation
-    (array files in aux sample folders) and Sample JSONs (metadata JSONs in
+    (array files in aux sample folders) and FOXDEN JSONs (metadata JSONs in
     a btr's metadata folder) act only when you click.
   default_root: /nfs/chess/raw      # only until a cycle and btr are picked
   # cycle and btr dropdowns next to the Root box. Experiment folders are
@@ -53,7 +53,7 @@ tabs:
       beamline config, a No Beam banner, and a mini plot that always follows
       the latest scan.
   - key: plot
-    label: SPEC Plot
+    label: SPEC data
     description: >-
       Pick X/Y columns, overlay multiple scans, switch
       line/scatter/line+scatter/bar, normalize, or use log scale. Optionally
@@ -61,7 +61,7 @@ tabs:
       file, or the previous plot during Auto-Refresh. Save or copy the chart
       as a PNG image.
   - key: live_image
-    label: Live Image                          # TODO(ID3A): detector name
+    label: Area Detectors
     description: >-
       Watch a folder of detector frames and see the newest one update in
       real time, with colormap choices and an optional ROI monitor.
@@ -125,7 +125,7 @@ tools:
     widget: array_generation_gui.array_gen_gui:ArrayGenPanel
     options: {mode: ff}
   - key: sample_jsons
-    label: Sample JSONs
+    label: FOXDEN JSONs
     description: >-
       Write the four starter sample-metadata JSONs (ceria, ruby, no sample,
       generic) for a btr into its metadata folder; the cycle and btr follow

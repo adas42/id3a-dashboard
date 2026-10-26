@@ -1313,7 +1313,8 @@ class LiveImageTab(QtWidgets.QWidget):
                     "hexrdgui isn't installed, so this tab can't render "
                     "detector frames. Install it with:\n\n"
                     "    conda install -c HEXRD/label/prerelease -c conda-forge hexrdgui\n\n"
-                    "then restart the dashboard to use the Live Image tab."
+                    "then restart the dashboard to use the "
+                    f"{SpecDashboardApp._tab_label('live_image')} tab."
                 )
             else:
                 text = (
@@ -1321,7 +1322,8 @@ class LiveImageTab(QtWidgets.QWidget):
                     "live_image.instrument (a hexrd instrument .yml) and "
                     "live_image.panels in\n\n"
                     f"    {CONFIG.get('_path', 'the beamline config')}\n\n"
-                    "then restart the dashboard to use the Live Image tab."
+                    "then restart the dashboard to use the "
+                    f"{SpecDashboardApp._tab_label('live_image')} tab."
                 )
             warn = QtWidgets.QLabel(text)
             warn.setWordWrap(True)
