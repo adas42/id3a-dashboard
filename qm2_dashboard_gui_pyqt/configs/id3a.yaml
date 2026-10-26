@@ -17,11 +17,14 @@ app:
   home_title: ID3A Beamline Dashboard          # TODO(ID3A): full beamline name
   home_subtitle: >-
     A native desktop viewer for SPEC scan files from CHESS ID3A, but it
-    works with any standard SPEC-format file. This is a read-only tool — it
-    never modifies your experiment data.
+    works with any standard SPEC-format file. It never modifies your
+    experiment data. Two tools act, and only when you click: Map Queue sends
+    points to the queue runner, and Array Generation writes array files into
+    a sample's aux folder.
   about_text: >-
     Native Qt (PySide6) GUI for browsing SPEC scan files from CHESS ID3A.
-    Read-only — never modifies source data.
+    Never modifies source data. Map Queue (queue points) and Array
+    Generation (array files in aux sample folders) act only when you click.
   default_root: /nfs/chess/raw/current/id3a
   # btr dropdown next to the Root box: the folders under btr_root whose
   # names fully match btr_pattern (a regex; name-NNNN-x, e.g.
@@ -97,6 +100,21 @@ map_queue:                  # the mapqueue runner (Map Queue tab)
   # section): the beam position and trail on the stage map.
   stage_url: http://127.0.0.1:8766
   trail_s: 120                        # seconds of trail shown
+
+# Tools from other repos, each a Tools-menu tab (the contract is in
+# tool_tabs.py). path is the repo root; widget is package.module:Class
+# inside it; options go to the widget's constructor. A tool that can't
+# load shows why in its tab; the rest of the dashboard isn't affected.
+tools:
+  - key: array_gen
+    label: Array Generation
+    description: >-
+      Write ff/nf/tomo layer-scan array files (for
+      do_{ff,nf,tomo}_scan_layers_array) into a sample's aux folder; the
+      sample folder follows the btr chosen above until you pick one.
+    path: /nfs/chess/user/chess_id3a/fast-scripts
+    widget: array_generation_gui.array_gen_gui:ArrayGenPanel
+    options: {mode: ff}
 
 signals:
   status_page_url: http://new-status.chess.cornell.edu/ID3A

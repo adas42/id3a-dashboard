@@ -63,6 +63,7 @@ import spec_core as sc
 import chess_signals as csig
 import ion_chamber_flux as icf
 import map_queue_tab as mqt
+import tool_tabs
 
 # hexrdgui is only needed for the Live Image tab, which renders detector
 # frames with hexrdgui's Cartesian view (hexrd_display.py). It takes seconds
@@ -107,6 +108,10 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # EMAIL_SETTINGS_PATH's password-remembering behavior above). Both set from
 # the config by _apply_config().
 SLACK_SETTINGS_PATH = ""
+# Which Tools-menu tabs were open when the dashboard last closed, so they
+# reopen next time. In the user's home directory, named from the config's
+# app.settings_prefix by _apply_config().
+TABS_SETTINGS_PATH = ""
 SLACK_DEFAULT_CHANNEL = ""
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 
@@ -437,6 +442,7 @@ def _apply_config(cfg: Dict):
     chess_signals."""
     global CONFIG, APP_TITLE, HOME_PAGE_TITLE
     global EMAIL_SETTINGS_PATH, SLACK_SETTINGS_PATH, SLACK_DEFAULT_CHANNEL
+    global TABS_SETTINGS_PATH
     global _DEFAULT_Y_PRIORITY, _X_FALLBACK_COLUMNS, _CALIBRATION_FILES
     global LIVE_FRAME_EXT
     global LIVE_INSTRUMENT, LIVE_PANELS, LIVE_HDF5_PATH
@@ -449,6 +455,7 @@ def _apply_config(cfg: Dict):
     home = os.path.expanduser("~")
     EMAIL_SETTINGS_PATH = os.path.join(home, f".{prefix}_email_settings.json")
     SLACK_SETTINGS_PATH = os.path.join(home, f".{prefix}_slack_settings.json")
+    TABS_SETTINGS_PATH = os.path.join(home, f".{prefix}_open_tabs.json")
     SLACK_DEFAULT_CHANNEL = cfg["slack"].get("default_channel") or ""
 
     _DEFAULT_Y_PRIORITY = list(cfg["plot"].get("default_y_priority") or [])
@@ -2135,6 +2142,10 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         theme_group.addAction(self.act_theme_light)
         theme_menu.addAction(self.act_theme_light)
 
+        # One checkable entry per tab that isn't pinned; filled by
+        # _setup_tool_tabs() once the tabs exist.
+        self.tools_menu = menubar.addMenu("&Tools")
+
         help_menu = menubar.addMenu("&Help")
         act_shortcuts = QtGui.QAction("Keyboard Shortcuts", self)
         act_shortcuts.triggered.connect(self._show_shortcuts)
@@ -2165,12 +2176,15 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(
             self, "About",
             f"{APP_TITLE}\n\n{CONFIG['app'].get('about_text', '')}\n\n"
-            f"Config: {CONFIG.get('_path', '')}",
+            f"Config: {CONFIG.get('_path', '')}" + "".join(
+                f"\n\n{entry['label']}: {entry['widget']}\nfrom "
+                f"{entry['path']} ({tool_tabs.source_version(entry['path'])})"
+                for entry in CONFIG["tools"]),
         )
 
     @staticmethod
     def _tab_label(key: str) -> str:
-        for entry in CONFIG["tabs"]:
+        for entry in CONFIG["tabs"] + CONFIG["tools"]:
             if entry["key"] == key:
                 return entry["label"]
         return bcfg.TAB_LABELS[key]
@@ -2180,9 +2194,141 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self.tabs.addTab(widget, self._tab_label(key))
 
     def _goto_tab(self, key: str):
+        """Show a tab, opening it first if it's a closed Tools tab."""
+        if any(entry["key"] == key for entry in self._tab_entries):
+            self._set_tab_open(key, True)
+
+    # ------------------------------------------------------------------
+    # Tools tabs: every tab but the pinned ones is opened and closed from
+    # the Tools menu (or its x). Closed tabs stay built and keep running
+    # (Map Queue keeps polling, Live Image keeps watching); they're only
+    # off the tab bar.
+    # ------------------------------------------------------------------
+    def _setup_tool_tabs(self):
+        """Take every tab off the bar, fill the Tools menu, and reopen the
+        pinned tabs plus the Tools tabs open last time."""
+        # The tabs on offer (show: true) in the config's order, then the
+        # tools from other repos (the config's tools:).
+        self._tab_entries = [entry for entry in CONFIG["tabs"] if entry["show"]]
+        self._tab_entries += [dict(entry, show=True) for entry in CONFIG["tools"]]
+        for widget in self._tab_widgets.values():
+            index = self.tabs.indexOf(widget)
+            if index != -1:
+                self.tabs.removeTab(index)
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabCloseRequested.connect(
+            lambda index: self._set_tab_open(self._tab_key(index), False))
+
+        self._tool_actions: Dict[str, QtGui.QAction] = {}
+        for entry in self._tab_entries:
+            if entry["key"] in bcfg.PINNED_TABS:
+                continue
+            action = QtGui.QAction(entry["label"], self, checkable=True)
+            action.setToolTip(entry["description"])
+            action.setStatusTip(entry["description"])
+            action.toggled.connect(
+                lambda checked, key=entry["key"]: self._set_tab_open(key, checked))
+            self.tools_menu.addAction(action)
+            self._tool_actions[entry["key"]] = action
+
+        self._restoring_tabs = True  # don't save while restoring
+        for key in self._tabs_to_open():
+            self._set_tab_open(key, True, select=False)
+        self._restoring_tabs = False
+        self.tabs.setCurrentIndex(0)
+
+    # ------------------------------------------------------------------
+    # Tools from other repos (the config's tools:; contract in tool_tabs.py)
+    # ------------------------------------------------------------------
+    def _build_external_tool_tabs(self):
+        """Load each configured tool as a tab. A tool that can't load shows
+        why in its tab; the rest of the dashboard isn't affected."""
+        self._external_tools: Dict[str, QtWidgets.QWidget] = {}
+        for entry in CONFIG["tools"]:
+            widget = tool_tabs.load_tool(entry)
+            tool_tabs.connect_messages(
+                widget, lambda text, label=entry["label"]:
+                self.status_label.setText(f"{label}: {text}"))
+            self._external_tools[entry["key"]] = widget
+            self._add_tab(entry["key"], widget)
+        if self.btr_combo is not None:
+            self.btr_combo.currentTextChanged.connect(
+                lambda _text: self._push_tool_context())
+        self._push_tool_context()
+
+    def _tool_context(self) -> Dict:
+        """What tools may know about the dashboard (set_context)."""
+        return {
+            "btr": self.btr_combo.currentText() if self.btr_combo else None,
+            "beamline": CONFIG["beamline"].get("name"),
+        }
+
+    def _push_tool_context(self):
+        context = self._tool_context()
+        for widget in self._external_tools.values():
+            tool_tabs.call_optional(widget, "set_context", context)
+
+    def _tab_key(self, index: int) -> Optional[str]:
+        widget = self.tabs.widget(index)
+        for key, tab in self._tab_widgets.items():
+            if tab is widget:
+                return key
+        return None
+
+    def _tabs_to_open(self) -> List[str]:
+        """The pinned tabs plus the Tools tabs open last time. First run (no
+        saved list, or an unreadable one): every tab on offer, as before."""
+        offered = [entry["key"] for entry in self._tab_entries]
+        try:
+            with open(TABS_SETTINGS_PATH, "r") as f:
+                saved = set(json.load(f)["open"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return offered
+        return [key for key in offered
+                if key in bcfg.PINNED_TABS or key in saved]
+
+    def _save_open_tabs(self):
+        if self._restoring_tabs:
+            return
+        open_keys = [key for key in self._tool_actions
+                     if self.tabs.indexOf(self._tab_widgets[key]) != -1]
+        try:
+            with open(TABS_SETTINGS_PATH, "w") as f:
+                json.dump({"open": open_keys}, f)
+        except OSError:
+            pass  # not remembering is fine; the tabs still work
+
+    def _set_tab_open(self, key: Optional[str], open_: bool, select: bool = True):
+        """Open (and show) or close one tab, keeping the config's order and
+        the Tools menu's check marks in step. Pinned tabs can't close."""
         widget = self._tab_widgets.get(key)
-        if widget is not None and self.tabs.indexOf(widget) != -1:
+        if widget is None:
+            return
+        index = self.tabs.indexOf(widget)
+        if open_ and index == -1:
+            # After the open tabs that come before it in the config.
+            position = 0
+            for entry in self._tab_entries:
+                if entry["key"] == key:
+                    break
+                if self.tabs.indexOf(self._tab_widgets[entry["key"]]) != -1:
+                    position += 1
+            index = self.tabs.insertTab(position, widget, self._tab_label(key))
+            if key in bcfg.PINNED_TABS:  # no x on the pinned tabs
+                bar = self.tabs.tabBar()
+                for side in (QtWidgets.QTabBar.LeftSide, QtWidgets.QTabBar.RightSide):
+                    if bar.tabButton(index, side) is not None:
+                        bar.setTabButton(index, side, None)
+        elif not open_ and index != -1 and key not in bcfg.PINNED_TABS:
+            self.tabs.removeTab(index)
+        if open_ and select:
             self.tabs.setCurrentWidget(widget)
+        action = self._tool_actions.get(key)
+        if action is not None and action.isChecked() != open_:
+            action.blockSignals(True)
+            action.setChecked(open_)
+            action.blockSignals(False)
+        self._save_open_tabs()
 
     # ------------------------------------------------------------------
     # Theme
@@ -2213,6 +2359,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             self.live_image_tab.apply_theme()
         if hasattr(self, "map_queue_tab"):
             self.map_queue_tab.apply_theme(THEMES[name])
+        for widget in getattr(self, "_external_tools", {}).values():
+            tool_tabs.call_optional(widget, "apply_theme", THEMES[name])
 
         # Re-render whatever is currently on screen so colors that depend on
         # theme (fit overlay, reference/ghost overlays, residuals, plotted
@@ -2331,25 +2479,16 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._build_ion_flux_tab()
         self._build_map_queue_tab()
         self._build_export_tab()
+        self._build_external_tool_tabs()
 
-        # Re-order the tabs on-screen to match the config's `tabs:` list,
-        # WITHOUT touching the _build_X_tab() call order above -- that order
-        # has real dependencies (e.g. _build_summary_tab() reads
+        # Put the tabs on screen in the config's `tabs:` order, WITHOUT
+        # touching the _build_X_tab() call order above -- that order has
+        # real dependencies (e.g. _build_summary_tab() reads
         # self.live_image_tab, so _build_live_image_tab() must still run
-        # first) that are independent of what order the tabs should visually
-        # appear in. Tabs with `show: false` are still built (other code
-        # refers to their widgets) but taken off the tab bar.
-        target_index = 0
-        for entry in CONFIG["tabs"]:
-            widget = self._tab_widgets[entry["key"]]
-            current_index = self.tabs.indexOf(widget)
-            if not entry["show"]:
-                self.tabs.removeTab(current_index)
-                continue
-            if current_index != target_index:
-                self.tabs.removeTab(current_index)
-                self.tabs.insertTab(target_index, widget, entry["label"])
-            target_index += 1
+        # first). Every tab is built, even `show: false` ones (other code
+        # refers to their widgets); _setup_tool_tabs() decides which are on
+        # the bar: the pinned ones and the Tools tabs open last time.
+        self._setup_tool_tabs()
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -3373,6 +3512,12 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         features_label = QtWidgets.QLabel("What you can do here")
         features_label.setStyleSheet("font-size: 15px; font-weight: bold;")
         layout.addWidget(features_label)
+        tools_hint = QtWidgets.QLabel(
+            "Open any of these from the Tools menu; close one with the × on "
+            "its tab. The open ones come back next time.")
+        tools_hint.setWordWrap(True)
+        tools_hint.setProperty("secondaryText", True)
+        layout.addWidget(tools_hint)
 
         features_grid = QtWidgets.QGridLayout()
         features_grid.setHorizontalSpacing(20)
@@ -3381,7 +3526,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             (entry["label"], entry["description"])
             for entry in CONFIG["tabs"]
             if entry["key"] != "home" and entry["show"]
-        ]
+        ] + [(entry["label"], entry["description"]) for entry in CONFIG["tools"]]
         for i, (name, desc) in enumerate(feature_items):
             name_lbl = QtWidgets.QLabel(f"● {name}")
             name_lbl.setStyleSheet("font-weight: bold;")
@@ -5524,6 +5669,10 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         the window doesn't leave a QThread (or a running QTimer) behind."""
         if hasattr(self, "live_image_tab"):
             self.live_image_tab.stop()
+        if hasattr(self, "map_queue_tab"):  # its runner and stage pollers
+            self.map_queue_tab.shutdown()
+        for widget in getattr(self, "_external_tools", {}).values():
+            tool_tabs.call_optional(widget, "shutdown")
         if hasattr(self, "_summary_timer"):
             self._summary_timer.stop()
         if hasattr(self, "_beam_signals_timer"):

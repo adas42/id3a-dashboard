@@ -9,7 +9,8 @@ commented reference.
 """
 
 import os
-from typing import Dict, Optional
+import re
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -33,6 +34,11 @@ TAB_LABELS: Dict[str, str] = {
     "slack_alerts": "Slack Alerts",
 }
 
+# Tabs always on the tab bar. Every other tab is opened and closed from
+# the Tools menu (or its x); the open ones are remembered between runs. A
+# tab with `show: false` in the config isn't offered at all.
+PINNED_TABS = ("home", "summary")
+
 REQUIRED_SECTIONS = (
     "beamline", "app", "tabs", "signals", "summary", "plot", "timeline",
     "data_layout", "spec_parsing", "live_image", "slack",
@@ -41,6 +47,46 @@ REQUIRED_SECTIONS = (
 
 class ConfigError(ValueError):
     """The beamline config file is missing something or is inconsistent."""
+
+
+# A tool's widget: "package.module:Class" (see tool_tabs.py). The module
+# must be inside a package, so tools never collide on bare module names.
+TOOL_WIDGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+:[A-Za-z_]\w*")
+
+
+def _normalize_tools(path: str, entries) -> List[Dict]:
+    """The optional `tools:` section: tools from other repos, each a
+    Tools-menu tab. Checks the entries' shape; tool_tabs.py loads them."""
+    tools = []
+    seen = set()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{path}: each tools entry must be a mapping")
+        key = entry.get("key")
+        if not key or not isinstance(key, str):
+            raise ConfigError(f"{path}: a tools entry has no key")
+        if key in TAB_LABELS or key in seen:
+            raise ConfigError(f"{path}: tool key {key!r} is already a tab key")
+        seen.add(key)
+        for field in ("path", "widget"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise ConfigError(f"{path}: tool {key!r} needs {field}")
+        if not TOOL_WIDGET.fullmatch(entry["widget"]):
+            raise ConfigError(
+                f"{path}: tool {key!r}: widget must be package.module:Class, "
+                f"not {entry['widget']!r}")
+        options = entry.get("options") or {}
+        if not isinstance(options, dict):
+            raise ConfigError(f"{path}: tool {key!r}: options must be a mapping")
+        tools.append({
+            "key": key,
+            "label": entry.get("label") or key,
+            "description": entry.get("description") or "",
+            "path": entry["path"],
+            "widget": entry["widget"],
+            "options": options,
+        })
+    return tools
 
 
 def load_config(path: Optional[str] = None) -> Dict:
@@ -116,6 +162,8 @@ def load_config(path: Optional[str] = None) -> Dict:
                 f"{path}: signals.flux.chambers lists {canonical!r}, which is "
                 "not defined under signals.channels"
             )
+
+    cfg["tools"] = _normalize_tools(path, cfg.get("tools"))
 
     cfg["_path"] = path
     return cfg

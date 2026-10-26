@@ -209,6 +209,7 @@ class StageMap(QtWidgets.QWidget):
         self._selected: Optional[str] = None
         self._shown_sample: Optional[str] = None
         self._fitted = False
+        self._titles: Dict[str, str] = {}  # axis -> title last set
         style_plot(self.plot, self._theme)
         self._show_overlay_controls()
 
@@ -381,10 +382,15 @@ class StageMap(QtWidgets.QWidget):
             self.beam.setData([], [])
             if stage:
                 self.where.setText("<b>Stage</b> &nbsp; beam position unknown")
+        # Set the titles only when they change: each setLabel relayouts the
+        # axis, and this runs on every poll.
         for axis, mne in (("bottom", names[0]), ("left", names[1])):
             label = "x" if axis == "bottom" else "z"
-            self.plot.setLabel(axis, f"{label} (mm)" + (
-                f"  [{mne}]" if mne and mne != "none" else ""))
+            title = f"{label} (mm)" + (f"  [{mne}]" if mne and mne != "none"
+                                       else "")
+            if self._titles.get(axis) != title:
+                self._titles[axis] = title
+                self.plot.setLabel(axis, title)
 
     def _draw_footprint(self):
         item = self._items.get(self._selected) if self._selected else None
