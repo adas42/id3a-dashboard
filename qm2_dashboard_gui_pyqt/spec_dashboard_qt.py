@@ -112,6 +112,8 @@ SLACK_SETTINGS_PATH = ""
 # reopen next time. In the user's home directory, named from the config's
 # app.settings_prefix by _apply_config().
 TABS_SETTINGS_PATH = ""
+# The cycle picked last time (cycle dropdown), the same way.
+SELECTION_SETTINGS_PATH = ""
 SLACK_DEFAULT_CHANNEL = ""
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 
@@ -442,7 +444,7 @@ def _apply_config(cfg: Dict):
     chess_signals."""
     global CONFIG, APP_TITLE, HOME_PAGE_TITLE
     global EMAIL_SETTINGS_PATH, SLACK_SETTINGS_PATH, SLACK_DEFAULT_CHANNEL
-    global TABS_SETTINGS_PATH
+    global TABS_SETTINGS_PATH, SELECTION_SETTINGS_PATH
     global _DEFAULT_Y_PRIORITY, _X_FALLBACK_COLUMNS, _CALIBRATION_FILES
     global LIVE_FRAME_EXT
     global LIVE_INSTRUMENT, LIVE_PANELS, LIVE_HDF5_PATH
@@ -456,6 +458,7 @@ def _apply_config(cfg: Dict):
     EMAIL_SETTINGS_PATH = os.path.join(home, f".{prefix}_email_settings.json")
     SLACK_SETTINGS_PATH = os.path.join(home, f".{prefix}_slack_settings.json")
     TABS_SETTINGS_PATH = os.path.join(home, f".{prefix}_open_tabs.json")
+    SELECTION_SETTINGS_PATH = os.path.join(home, f".{prefix}_selection.json")
     SLACK_DEFAULT_CHANNEL = cfg["slack"].get("default_channel") or ""
 
     _DEFAULT_Y_PRIORITY = list(cfg["plot"].get("default_y_priority") or [])
@@ -2251,15 +2254,17 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
                 self.status_label.setText(f"{label}: {text}"))
             self._external_tools[entry["key"]] = widget
             self._add_tab(entry["key"], widget)
-        if self.btr_combo is not None:
+        if self.btr_combo is not None:  # a cycle change pushes it too
             self.btr_combo.currentTextChanged.connect(
                 lambda _text: self._push_tool_context())
         self._push_tool_context()
 
     def _tool_context(self) -> Dict:
-        """What tools may know about the dashboard (set_context)."""
+        """What tools may know about the dashboard (set_context): the
+        explicit cycle and btr picked in the top bar."""
         return {
-            "btr": self.btr_combo.currentText() if self.btr_combo else None,
+            "cycle": self.cycle_combo.currentText() if self.cycle_combo else None,
+            "btr": (self.btr_combo.currentText() or None) if self.btr_combo else None,
             "beamline": CONFIG["beamline"].get("name"),
         }
 
@@ -2394,25 +2399,33 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         btn_browse = QtWidgets.QPushButton("Browse Folder…")
         btn_browse.clicked.connect(self.set_root_folder)
         top_bar.addWidget(btn_browse)
-        # btr: pick an experiment folder under the beamline's raw-data root
-        # (app.btr_root; folders whose names match app.btr_pattern). The
-        # most recently modified is picked at startup; picking one points
-        # the Root box and file browser at it.
+        # cycle + btr: pick an experiment folder
+        # <raw_root>/<cycle>/<beamline_dir>/<btr>/ -- always an explicit
+        # cycle, never a "current" link. The cycle starts at the one picked
+        # last time (else the highest); the btr at the most recently
+        # modified in that cycle. Picking one points the Root box and file
+        # browser at it (and tools get the cycle and btr).
+        self.cycle_combo = None
         self.btr_combo = None
-        btr_root = CONFIG["app"].get("btr_root")
-        if btr_root:
+        raw_root = CONFIG["app"].get("raw_root")
+        if raw_root:
+            top_bar.addWidget(QtWidgets.QLabel("cycle:"))
+            self.cycle_combo = QtWidgets.QComboBox()
+            self.cycle_combo.setToolTip(f"Run cycle: a folder under {raw_root}")
+            cycles = [name for name, _mtime in self._list_folders(
+                raw_root, CONFIG["app"].get("cycle_pattern") or r"\d{4}-\d")]
+            self.cycle_combo.addItems(cycles)
+            top_bar.addWidget(self.cycle_combo)
             top_bar.addWidget(QtWidgets.QLabel("btr:"))
             self.btr_combo = QtWidgets.QComboBox()
-            self.btr_combo.setToolTip("Experiment (btr) folder under %s" % btr_root)
-            btrs = self._list_btrs(btr_root, CONFIG["app"].get("btr_pattern"))
-            self.btr_combo.addItems([name for name, _mtime in btrs])
-            if btrs:
-                newest = max(btrs, key=lambda b: b[1])[0]
-                self.btr_combo.setCurrentText(newest)
-                self.root_path = self.current_browse_path = os.path.join(btr_root, newest)
-                self.root_edit.setText(self.root_path)
-            self.btr_combo.currentTextChanged.connect(self._on_btr_selected)
             top_bar.addWidget(self.btr_combo)
+            saved = self._load_selection().get("cycle")
+            if cycles:
+                self.cycle_combo.setCurrentText(
+                    saved if saved in cycles else max(cycles, key=self._cycle_order))
+                self._fill_btrs(self.cycle_combo.currentText())
+            self.cycle_combo.currentTextChanged.connect(self._on_cycle_selected)
+            self.btr_combo.currentTextChanged.connect(self._on_btr_selected)
         btn_sample = QtWidgets.QPushButton("Load Sample Data")
         btn_sample.clicked.connect(self.load_sample_data)
         top_bar.addWidget(btn_sample)
@@ -3099,30 +3112,83 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
     # in the config overrides it).
     _DEFAULT_BTR_PATTERN = r"[A-Za-z][A-Za-z-]*-\d{4}-[A-Za-z]"
 
-    @classmethod
-    def _list_btrs(cls, root: str, pattern: Optional[str]) -> List[tuple]:
+    @staticmethod
+    def _list_folders(root: str, pattern: str) -> List[tuple]:
         """Folders directly under `root` whose names fully match `pattern`,
         as [(name, mtime)] sorted by name. Read-only."""
-        rx = re.compile(pattern or cls._DEFAULT_BTR_PATTERN)
-        btrs = []
+        rx = re.compile(pattern)
+        folders = []
         try:
             with os.scandir(root) as it:
                 for entry in it:
                     if entry.is_dir(follow_symlinks=True) and rx.fullmatch(entry.name):
-                        btrs.append((entry.name, entry.stat().st_mtime))
+                        folders.append((entry.name, entry.stat().st_mtime))
         except OSError:
             return []
-        return sorted(btrs)
+        return sorted(folders)
+
+    @staticmethod
+    def _cycle_order(cycle: str) -> tuple:
+        """Sort key for cycles by their numbers: 2026-3 after 2026-2."""
+        return tuple(int(n) for n in re.findall(r"\d+", cycle))
+
+    @staticmethod
+    def _btr_dir(cycle: str, btr: str = "") -> str:
+        """<raw_root>/<cycle>/<beamline_dir>/<btr> -- never a "current" link."""
+        app = CONFIG["app"]
+        return os.path.join(app["raw_root"], cycle, app["beamline_dir"], btr)
+
+    def _fill_btrs(self, cycle: str):
+        """List the cycle's btrs and pick the most recently modified; point
+        the Root box at it (or at the cycle's beamline folder if none)."""
+        btrs = self._list_folders(self._btr_dir(cycle),
+                                  CONFIG["app"].get("btr_pattern")
+                                  or self._DEFAULT_BTR_PATTERN)
+        self.btr_combo.blockSignals(True)
+        self.btr_combo.clear()
+        self.btr_combo.addItems([name for name, _mtime in btrs])
+        newest = max(btrs, key=lambda b: b[1])[0] if btrs else ""
+        self.btr_combo.setCurrentText(newest)
+        self.btr_combo.blockSignals(False)
+        self.btr_combo.setToolTip(f"Experiment (btr) folder under {self._btr_dir(cycle)}")
+        self.root_path = self.current_browse_path = self._btr_dir(cycle, newest)
+        self.root_edit.setText(self.root_path)
+
+    def _on_cycle_selected(self, cycle: str):
+        """A new cycle: its btrs, the newest picked, and remember it."""
+        self._fill_btrs(cycle)
+        self._refresh_file_tree()
+        self._save_selection({"cycle": cycle})
+        if hasattr(self, "_external_tools"):
+            self._push_tool_context()
+        self.status_label.setText(f"cycle: {cycle}, btr: {self.btr_combo.currentText()}")
 
     def _on_btr_selected(self, name: str):
         """Point the Root box and file browser at the chosen btr folder."""
-        path = os.path.join(CONFIG["app"]["btr_root"], name)
-        if not os.path.isdir(path):
+        path = self._btr_dir(self.cycle_combo.currentText(), name)
+        if not name or not os.path.isdir(path):
             return
         self.root_path = self.current_browse_path = path
         self.root_edit.setText(path)
         self._refresh_file_tree()
         self.status_label.setText(f"btr: {name}")
+
+    @staticmethod
+    def _load_selection() -> Dict:
+        try:
+            with open(SELECTION_SETTINGS_PATH, "r") as f:
+                saved = json.load(f)
+            return saved if isinstance(saved, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def _save_selection(selection: Dict):
+        try:
+            with open(SELECTION_SETTINGS_PATH, "w") as f:
+                json.dump(selection, f)
+        except OSError:
+            pass  # not remembering is fine
 
     def _refresh_file_tree(self):
         self.file_tree.clear()

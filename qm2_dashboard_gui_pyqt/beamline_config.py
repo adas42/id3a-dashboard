@@ -163,6 +163,15 @@ def load_config(path: Optional[str] = None) -> Dict:
                 "not defined under signals.channels"
             )
 
+    if cfg["app"].get("btr_root"):
+        raise ConfigError(
+            f"{path}: app.btr_root was replaced by app.raw_root + "
+            "app.beamline_dir: experiment folders are "
+            "<raw_root>/<cycle>/<beamline_dir>/<btr>/, with an explicit "
+            "cycle (no 'current' links)")
+    if cfg["app"].get("raw_root") and not cfg["app"].get("beamline_dir"):
+        raise ConfigError(f"{path}: app.raw_root needs app.beamline_dir")
+
     cfg["tools"] = _normalize_tools(path, cfg.get("tools"))
 
     cfg["_path"] = path

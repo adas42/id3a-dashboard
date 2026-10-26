@@ -18,19 +18,28 @@ app:
   home_subtitle: >-
     A native desktop viewer for SPEC scan files from CHESS ID3A, but it
     works with any standard SPEC-format file. It never modifies your
-    experiment data. Two tools act, and only when you click: Map Queue sends
-    points to the queue runner, and Array Generation writes array files into
-    a sample's aux folder.
+    experiment data. Three tools act, and only when you click: Map Queue
+    sends points to the queue runner, Array Generation writes array files
+    into a sample's aux folder, and Sample JSONs writes the starter
+    sample-metadata JSONs into a btr's metadata folder.
   about_text: >-
     Native Qt (PySide6) GUI for browsing SPEC scan files from CHESS ID3A.
-    Never modifies source data. Map Queue (queue points) and Array
-    Generation (array files in aux sample folders) act only when you click.
-  default_root: /nfs/chess/raw/current/id3a
-  # btr dropdown next to the Root box: the folders under btr_root whose
-  # names fully match btr_pattern (a regex; name-NNNN-x, e.g.
-  # hedstrom-5112-a). The most recently modified is picked at startup;
-  # picking one points the Root box and file browser at it.
-  btr_root: /nfs/chess/raw/current/id3a
+    Never modifies source data. Map Queue (queue points), Array Generation
+    (array files in aux sample folders) and Sample JSONs (metadata JSONs in
+    a btr's metadata folder) act only when you click.
+  default_root: /nfs/chess/raw      # only until a cycle and btr are picked
+  # cycle and btr dropdowns next to the Root box. Experiment folders are
+  # <raw_root>/<cycle>/<beamline_dir>/<btr>/, always with an explicit
+  # cycle (no "current" links). The cycle dropdown lists the folders under
+  # raw_root whose names fully match cycle_pattern (e.g. 2026-3); it starts
+  # at the cycle picked last time, else the highest. The btr dropdown lists
+  # that cycle's folders matching btr_pattern (name-NNNN-x, e.g.
+  # hedstrom-5112-a); the most recently modified is picked. Picking one
+  # points the Root box and file browser at it, and tools get the cycle
+  # and btr.
+  raw_root: /nfs/chess/raw
+  beamline_dir: id3a
+  cycle_pattern: '\d{4}-\d'
   btr_pattern: '[A-Za-z][A-Za-z-]*-\d{4}-[A-Za-z]'
   settings_prefix: id3a_dashboard
 
@@ -115,6 +124,14 @@ tools:
     path: /nfs/chess/user/chess_id3a/fast-scripts
     widget: array_generation_gui.array_gen_gui:ArrayGenPanel
     options: {mode: ff}
+  - key: sample_jsons
+    label: Sample JSONs
+    description: >-
+      Write the four starter sample-metadata JSONs (ceria, ruby, no sample,
+      generic) for a btr into its metadata folder; the cycle and btr follow
+      the ones chosen above until you pick others.
+    path: /nfs/chess/user/chess_id3a/fast-scripts
+    widget: foxden_utils.create_sample_jsons_gui:SampleJsonsPanel
 
 signals:
   status_page_url: http://new-status.chess.cornell.edu/ID3A

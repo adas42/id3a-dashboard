@@ -20,8 +20,9 @@ The contract a tool keeps:
 - `Class` is a QWidget, built as Class(**options). It doesn't create a
   QApplication, call sys.exit, change the window, or block the UI
   thread for long (slow work goes in a thread).
-- Optional: `set_context(dict)` (the dashboard's context, e.g. "btr";
-  unknown keys are ignored), `apply_theme(dict)` (the palette, on a
+- Optional: `set_context(dict)` (the dashboard's context: "cycle" and
+  "btr" as picked in its top bar, always explicit, never a "current"
+  link, plus "beamline"; unknown keys are ignored), `apply_theme(dict)` (the palette, on a
   theme switch), a `message` Signal(str) (shown in the status bar), and
   `shutdown()` (when the dashboard closes).
 
