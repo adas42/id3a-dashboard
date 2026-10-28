@@ -62,7 +62,7 @@ import beamline_config as bcfg
 import spec_core as sc
 import chess_signals as csig
 import ion_chamber_flux as icf
-import map_queue_tab as mqt
+import spectator_tab as spt
 import tool_tabs
 
 # hexrdgui is only needed for the Live Image tab, which renders detector
@@ -2206,7 +2206,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Tools tabs: every tab but the pinned ones is opened and closed from
     # the Tools menu (or its x). Closed tabs stay built and keep running
-    # (Map Queue keeps polling, Live Image keeps watching); they're only
+    # (SPECtator keeps polling, Live Image keeps watching); they're only
     # off the tab bar.
     # ------------------------------------------------------------------
     def _setup_tool_tabs(self):
@@ -2364,8 +2364,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
             panel.apply_theme()
         if hasattr(self, "live_image_tab"):
             self.live_image_tab.apply_theme()
-        if hasattr(self, "map_queue_tab"):
-            self.map_queue_tab.apply_theme(THEMES[name])
+        if hasattr(self, "spectator_tab"):
+            self.spectator_tab.apply_theme(THEMES[name])
         for widget in getattr(self, "_external_tools", {}).values():
             tool_tabs.call_optional(widget, "apply_theme", THEMES[name])
 
@@ -2492,7 +2492,7 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         self._build_summary_tab()
         self._build_slack_alerts_tab()
         self._build_ion_flux_tab()
-        self._build_map_queue_tab()
+        self._build_spectator_tab()
         self._build_export_tab()
         self._build_external_tool_tabs()
 
@@ -2903,28 +2903,28 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         ("flux", "Flux (ph/s)"),
     )
 
-    def _build_map_queue_tab(self):
-        """"Map Queue" tab: the mapqueue runner's queue (map_queue_tab.py),
+    def _build_spectator_tab(self):
+        """"SPECtator" tab: the SPECtator runner's queue (spectator_tab.py),
         through the runner's local HTTP API, and the stage map
         (stage_map.py) from the read-only stage service. Needs the
-        beamline YAML's `map_queue` section: url and client_path for the
+        beamline YAML's `spectator` section: url and client_path for the
         queue, stage_url for the map; with stage_url alone it's the map
         alone."""
-        cfg = CONFIG.get("map_queue") or {}
+        cfg = CONFIG.get("spectator") or {}
         if cfg.get("url") or cfg.get("stage_url"):
-            widget = mqt.MapQueueTab(cfg.get("url"), cfg.get("client_path"),
+            widget = spt.SpectatorTab(cfg.get("url"), cfg.get("client_path"),
                                      float(cfg.get("poll_s", 1.0)),
                                      theme=THEMES[self.current_theme],
                                      stage_url=cfg.get("stage_url"),
                                      trail_s=float(cfg.get("trail_s", 120)))
-            self.map_queue_tab = widget
+            self.spectator_tab = widget
         else:
             widget = QtWidgets.QLabel(
-                "The Map Queue tab isn't configured: add a map_queue section "
+                "The SPECtator tab isn't configured: add a spectator section "
                 "(url and client_path, and/or stage_url) to the beamline YAML.")
             widget.setWordWrap(True)
             widget.setAlignment(QtCore.Qt.AlignCenter)
-        self._add_tab("map_queue", widget)
+        self._add_tab("spectator", widget)
 
     def _build_ion_flux_tab(self):
         """"Ion Chamber Flux" tab: X-ray flux from ion chamber counts, a
@@ -5737,8 +5737,8 @@ class SpecDashboardApp(QtWidgets.QMainWindow):
         the window doesn't leave a QThread (or a running QTimer) behind."""
         if hasattr(self, "live_image_tab"):
             self.live_image_tab.stop()
-        if hasattr(self, "map_queue_tab"):  # its runner and stage pollers
-            self.map_queue_tab.shutdown()
+        if hasattr(self, "spectator_tab"):  # its runner and stage pollers
+            self.spectator_tab.shutdown()
         for widget in getattr(self, "_external_tools", {}).values():
             tool_tabs.call_optional(widget, "shutdown")
         if hasattr(self, "_summary_timer"):

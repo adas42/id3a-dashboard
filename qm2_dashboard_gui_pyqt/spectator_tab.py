@@ -1,8 +1,8 @@
-"""The "Map Queue" tab: watch and steer the mapqueue runner.
+"""The "SPECtator" tab: watch and steer the SPECtator runner.
 
-It talks only to the runner's HTTP API, through mapqueue's
-standard-library client, imported from the mapqueue checkout named in
-the beamline YAML's `map_queue` section. Every request runs in a worker
+It talks only to the runner's HTTP API, through spectator's
+standard-library client, imported from the spectator checkout named in
+the beamline YAML's `spectator` section. Every request runs in a worker
 thread, so the UI never waits on the network. The runner is the only
 thing that changes the queue: a drag-and-drop or a button asks it to,
 and the table shows the result on the next fetch.
@@ -14,7 +14,7 @@ the beam's position and trail from the read-only stage service, with
 the queue's points on top). The map and the timeline are dock panels
 that float out into their own windows.
 
-Without a runner URL (map_queue.url) the tab is the stage map alone:
+Without a runner URL (spectator.url) the tab is the stage map alone:
 nothing in it can queue points or steer the runner.
 """
 
@@ -41,7 +41,7 @@ COLUMNS = [
     ("dataset_id", "Dataset"), ("scan", "Scan"), ("mode", "Mode"),
     ("attempts", "Attempts"), ("scan_n", "Scan #"), ("problems", "Problems"),
 ]
-MIME_TYPE = "application/x-mapqueue-ids"
+MIME_TYPE = "application/x-spectator-ids"
 
 # The runner's state -> the status color it's shown in.
 STATE_COLORS = {
@@ -726,7 +726,7 @@ class ImportDialog(QtWidgets.QDialog):
 # ----------------------------------------------------------------------
 # The tab
 # ----------------------------------------------------------------------
-class MapQueueTab(QtWidgets.QWidget):
+class SpectatorTab(QtWidgets.QWidget):
 
     def __init__(self, url: Optional[str], client_path: Optional[str] = None,
                  poll_s: float = 1.0, theme: Optional[Dict] = None,
@@ -748,12 +748,12 @@ class MapQueueTab(QtWidgets.QWidget):
         try:
             if client_path and client_path not in sys.path:
                 sys.path.insert(0, client_path)
-            from mapqueue.client import ApiError, Client
-            from mapqueue.legacy import COL11_CHOICES
+            from spectator.client import ApiError, Client
+            from spectator.legacy import COL11_CHOICES
         except ImportError as exc:
             message = QtWidgets.QLabel(
-                f"Can't load mapqueue's client from {client_path!r}: {exc}. "
-                "Check map_queue.client_path in the beamline YAML.")
+                f"Can't load spectator's client from {client_path!r}: {exc}. "
+                "Check spectator.client_path in the beamline YAML.")
             message.setWordWrap(True)
             outer.addWidget(message)
             outer.addWidget(self.map, 1)

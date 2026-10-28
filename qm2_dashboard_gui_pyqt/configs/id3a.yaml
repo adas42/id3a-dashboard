@@ -18,13 +18,13 @@ app:
   home_subtitle: >-
     A native desktop viewer for SPEC scan files from CHESS ID3A, but it
     works with any standard SPEC-format file. It never modifies your
-    experiment data. Three tools act, and only when you click: Map Queue
+    experiment data. Three tools act, and only when you click: SPECtator
     sends points to the queue runner, Array Generation writes array files
     into a sample's aux folder, and FOXDEN JSONs writes the starter
     sample-metadata JSONs into a btr's metadata folder.
   about_text: >-
     Native Qt (PySide6) GUI for browsing SPEC scan files from CHESS ID3A.
-    Never modifies source data. Map Queue (queue points), Array Generation
+    Never modifies source data. SPECtator (queue points), Array Generation
     (array files in aux sample folders) and FOXDEN JSONs (metadata JSONs in
     a btr's metadata folder) act only when you click.
   default_root: /nfs/chess/raw      # only until a cycle and btr are picked
@@ -88,10 +88,10 @@ tabs:
     description: >-
       X-ray flux from ion chamber counts (gas, chamber length, energy,
       counter range), ported from the CHESS web calculator.
-  - key: map_queue
-    label: Map Queue
+  - key: spectator
+    label: SPECtator
     description: >-
-      The mapqueue runner's queue of map points: what's running, holds and
+      the SPECtator runner's queue of map points: what's running, holds and
       OKs, drag-and-drop reordering, and importing old mapscan files.
   - key: slack_alerts
     label: Slack Alerts
@@ -99,13 +99,13 @@ tabs:
       Post a Slack message automatically whenever beam is lost or restored.
       Runs in the background regardless of which tab is open.
 
-map_queue:                  # the mapqueue runner (Map Queue tab)
+spectator:                  # the SPECtator runner (SPECtator tab)
   # Leave url out to show only the stage map: then nothing in the tab
   # can queue points or steer the runner.
   url: http://127.0.0.1:8765          # its local API (the runner's api: section)
-  client_path: /nfs/chess/user/ad785/codes/mapqueue   # checkout with mapqueue/client.py
+  client_path: /nfs/chess/user/ad785/codes/spectator   # checkout with spectator/client.py
   poll_s: 1.0                         # seconds between status polls
-  # The read-only stage service (python -m mapqueue.stage; its stage:
+  # The read-only stage service (python -m spectator.stage; its stage:
   # section): the beam position and trail on the stage map.
   stage_url: http://127.0.0.1:8766
   trail_s: 120                        # seconds of trail shown

@@ -1,15 +1,15 @@
 """Stage map: where the beam is on the sample, live.
 
-A pyqtgraph map of the sample's x-z plane, fed by mapqueue's read-only
-stage service (`python -m mapqueue.stage`, GET /stage): the XM/Z user
+A pyqtgraph map of the sample's x-z plane, fed by spectator's read-only
+stage service (`python -m spectator.stage`, GET /stage): the XM/Z user
 limits as a dashed frame, the beam's position now as a cross, and a
 fading trail of where it has been. The stage service sends spec no
 commands and can't queue anything, so the map works whether or not the
 queue runner is running.
 
-The Map Queue tab overlays the queue's points on it while the runner is
+The SPECtator tab overlays the queue's points on it while the runner is
 up (set_items); with no items it's the stage alone. Polling uses only
-the standard library, so this module needs neither mapqueue nor pyspec.
+the standard library, so this module needs neither spectator nor pyspec.
 """
 
 import json
@@ -224,7 +224,7 @@ class StageMap(QtWidgets.QWidget):
             self.poller.start()
         else:
             self.where.setText("no stage service configured "
-                               "(map_queue.stage_url)")
+                               "(spectator.stage_url)")
 
     # Inputs
 
